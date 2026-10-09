@@ -298,9 +298,10 @@ class FacebookWorkerTest(unittest.TestCase):
         from crawlers.facebook import crawl_facebook as fb
         from crawlers.electric_bus.config import ELECTRIC_BUS_QUERIES
         self.assertTrue(fb.SOURCES)
-        self.assertTrue(all("query" in s for s in fb.SOURCES))
-        self.assertTrue(all(s["source_class"] == "electric_bus_search" for s in fb.SOURCES))
-        self.assertTrue(all(s["query"] in ELECTRIC_BUS_QUERIES for s in fb.SOURCES))
+        search = [s for s in fb.SOURCES if s["kind"] != "public_page"]
+        self.assertTrue(all(s["source_class"] == "electric_bus_search" for s in search))
+        self.assertTrue(all(s["query"] in ELECTRIC_BUS_QUERIES for s in search))
+        self.assertTrue(all(s["url"] for s in fb.SOURCES if s["kind"] == "public_page"))
 
 
 if __name__ == "__main__":

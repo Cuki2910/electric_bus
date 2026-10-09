@@ -42,7 +42,10 @@ def gate_electric_bus(title="", body=""):
 _VN_EVIDENCE = re.compile(
     r"[ăắằẳẵặấầẩẫậềếểễệồốổỗộơờớởỡợưừứửữựđảạẻẹẽỉịỏọủụỷỵỹ]|"
     r"(?<!\w)(?:vietnam|viet nam|hanoi|ha noi|saigon|ho chi minh|vinbus|vinfast|vingroup|"
-    r"xanh sm|tp\.? ?hcm|da nang)(?!\w)",
+    r"xanh sm|tp\.? ?hcm|da nang|"
+    # Vietnamese typed without diacritics (queries include "xe buyt dien", "bus dien").
+    r"xe bus|xe buyt|buyt dien|bus dien|tuyen|khong|duoc|cua|nhung|nhieu|"
+    r"sai gon|ha noi|ben xe|tram dung)(?!\w)",
     re.IGNORECASE,
 )
 
@@ -54,9 +57,3 @@ def gate_electric_bus_vietnam(title="", body=""):
     if not _VN_EVIDENCE.search(f"{_norm(title)} {_norm(body)}"):
         return "reject", "not_vietnam"
     return verdict, reason
-
-def is_on_topic_threads(post_text, hashtags=None, source=None):
-    """Threads wrapper: post text + a plain space-joined hashtag blob.
-    ``source`` accepted for call-site compatibility, not consulted."""
-    hashtag_blob = " ".join((hashtags or []))
-    return gate_electric_bus_vietnam(post_text or "", hashtag_blob)

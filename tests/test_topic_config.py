@@ -17,8 +17,9 @@ class TopicConfigTests(unittest.TestCase):
         from crawlers.youtube import crawl_youtube as youtube
 
         self.assertEqual(youtube.KEYWORDS, list(ELECTRIC_BUS_QUERIES))
-        self.assertEqual(len(facebook.SOURCES), len(ELECTRIC_BUS_QUERIES) * 2)
-        self.assertTrue(all(source["query"] in ELECTRIC_BUS_QUERIES for source in facebook.SOURCES))
+        search = [s for s in facebook.SOURCES if s["kind"] != "public_page"]
+        self.assertEqual(len(search), len(ELECTRIC_BUS_QUERIES) * 2)
+        self.assertTrue(all(source["query"] in ELECTRIC_BUS_QUERIES for source in search))
         self.assertEqual({spec["keyword"] for spec in youtube_search_specs()}, set(ELECTRIC_BUS_QUERIES))
 
     def test_publication_window_boundaries(self):

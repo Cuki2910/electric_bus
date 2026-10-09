@@ -4,7 +4,6 @@ from crawlers.electric_bus.queries import KEYWORDS as ELECTRIC_BUS_KEYWORDS
 from crawlers.topics import (
     gate_electric_bus,
     gate_electric_bus_vietnam,
-    is_on_topic_threads,
 )
 
 
@@ -38,6 +37,13 @@ class ElectricBusVietnamGateTests(unittest.TestCase):
             ("reject", "not_vietnam"),
         )
 
+    def test_accepts_vietnamese_without_diacritics(self):
+        self.assertEqual(gate_electric_bus_vietnam("di xe buyt dien rat em, khong on")[0], "accept")
+
+    def test_rejects_foreign_with_stray_words(self):
+        self.assertEqual(
+            gate_electric_bus_vietnam("Electric bus tuned for the cuando route")[0], "reject")
+
 
 class ElectricBusQueryListTests(unittest.TestCase):
     def test_no_duplicates(self):
@@ -55,21 +61,6 @@ class ElectricBusQueryListTests(unittest.TestCase):
         blob = " ".join(ELECTRIC_BUS_KEYWORDS).lower()
         self.assertIn("hà nội", blob)
         self.assertTrue("hồ chí minh" in blob or "tphcm" in blob or "sài gòn" in blob)
-
-
-class ElectricBusPlatformVietnamGateTests(unittest.TestCase):
-    """Threads electric-bus wrapper gates through
-    gate_electric_bus_vietnam() now, same as YouTube -- confirms the
-    swap actually took effect at each wrapper, not just at the base gate
-    function."""
-
-    def test_threads_rejects_foreign_content(self):
-        verdict, rule = is_on_topic_threads("Electric bus in Argentina", [])
-        self.assertEqual((verdict, rule), ("reject", "not_vietnam"))
-
-    def test_threads_accepts_vietnam_content(self):
-        verdict, _rule = is_on_topic_threads("Trải nghiệm đi VinBus hôm nay", [])
-        self.assertEqual(verdict, "accept")
 
 
 if __name__ == "__main__":
