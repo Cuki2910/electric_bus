@@ -74,7 +74,7 @@ _ACTION_STATE_ATTR = "data-scraped-action-state"
 _CAPTURE_POST_METADATA_JS = r"""
 () => {
     let cleanTitle = (document.title || '')
-        .replace(/^\(\d+\)\s*/, '')
+        .replace(/^\(\d+\+?\)\s*/, '')
         .replace(/\s*\|\s*Facebook\s*$/, '')
         .split(/\s+-\s+/)[0]
         .trim();
@@ -902,9 +902,11 @@ def discover_posts(source):
 def _capture_post_metadata_page(page):
     try:
         page.wait_for_selector('div[role="article"]', timeout=30000)
-        page.wait_for_timeout(2500)
     except Exception:
-        return page
+        # photo/watch/reel pages have no role=article; still run the capture so the
+        # creation_time fallback fills the date (body comes from creation_story).
+        pass
+    page.wait_for_timeout(2500)
     page.evaluate(_CAPTURE_POST_METADATA_JS)
     return page
 
