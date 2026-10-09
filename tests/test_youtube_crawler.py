@@ -11,6 +11,29 @@ yt = importlib.import_module("crawlers.youtube.crawl_youtube")
 
 
 class YouTubeCrawlerTests(unittest.TestCase):
+    def test_june_and_july_searches_are_seeded_once(self):
+        import json
+        from crawlers.baseline_store import BaselineStore
+        from crawlers.electric_bus.config import ELECTRIC_BUS_QUERIES
+        from crawlers.youtube import youtube_worker
+
+        output_dir = tempfile.mkdtemp(prefix="yt_window_")
+        store = BaselineStore(base_dir=output_dir)
+        try:
+            store.kv_set("youtube_seeded", True)
+            youtube_worker.seed_queue(store)
+            youtube_worker.seed_queue(store)
+            rows = store.conn.execute("SELECT payload FROM discovery_queue WHERE platform='youtube'").fetchall()
+            self.assertEqual(len(rows), 2 * len(ELECTRIC_BUS_QUERIES))
+            intervals = {(p["after"], p["before"]) for row in rows for p in [json.loads(row["payload"])]}
+            self.assertEqual(intervals, {
+                ("2026-05-31T17:00:00Z", "2026-06-30T17:00:00Z"),
+                ("2026-06-30T17:00:00Z", "2026-07-31T17:00:00Z"),
+            })
+        finally:
+            store.close()
+            shutil.rmtree(output_dir, ignore_errors=True)
+
     def test_search_keeps_metadata(self):
         payload = {"items": [{"id": {"videoId": "v1"}, "snippet": {"title": "Xe buýt điện Hà Nội", "description": "xe buýt chậm", "publishedAt": "2026-01-01T00:00:00Z"}}]}
         with patch.object(yt, "_api_get", return_value=payload), patch.object(yt.time, "sleep"):
@@ -138,6 +161,7 @@ class YouTubeCrawlerTests(unittest.TestCase):
         try:
             run = store.get_or_create_run(24, 5000)
             store.kv_set("youtube_seeded", True)
+            store.kv_set("youtube_june_2026_backfill_seeded", True)
             store.kv_set("youtube_deficit_ranked_hour", time.strftime("%Y%m%d%H", time.gmtime()))
             store.upsert_context({
                 "platform": "youtube", "context_id": "v1", "source_url": "u",
@@ -191,6 +215,7 @@ class YouTubeCrawlerTests(unittest.TestCase):
         try:
             run = store.get_or_create_run(24, 5000)
             store.kv_set("youtube_seeded", True)
+            store.kv_set("youtube_june_2026_backfill_seeded", True)
             store.kv_set("youtube_deficit_ranked_hour", time.strftime("%Y%m%d%H", time.gmtime()))
             store.upsert_context({
                 "platform": "youtube", "context_id": "v1", "source_url": "u",
@@ -289,6 +314,7 @@ class YouTubeCrawlerTests(unittest.TestCase):
         try:
             run = store.get_or_create_run(24, 5000)
             store.kv_set("youtube_seeded", True)
+            store.kv_set("youtube_june_2026_backfill_seeded", True)
             store.enqueue("youtube", "search", {
                 "keyword": "q", "after": "2026-01-01T00:00:00Z", "before": "2027-01-01T00:00:00Z",
             })
@@ -315,6 +341,7 @@ class YouTubeCrawlerTests(unittest.TestCase):
         try:
             run = store.get_or_create_run(24, 5000)
             store.kv_set("youtube_seeded", True)
+            store.kv_set("youtube_june_2026_backfill_seeded", True)
             error = yt.YouTubeAPIError(403, "rateLimitExceeded", {})
             delays = []
             for index in range(3):

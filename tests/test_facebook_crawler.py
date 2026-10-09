@@ -26,6 +26,14 @@ SOURCE = {
 
 
 class FacebookCrawlerTests(unittest.TestCase):
+    def test_publication_window_starts_in_june(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        now = datetime(2026, 10, 9, tzinfo=ZoneInfo("Asia/Ho_Chi_Minh"))
+        self.assertFalse(fb.post_in_window("2026-05-31T23:59:59+07:00", now))
+        self.assertTrue(fb.post_in_window("2026-06-01T00:00:00+07:00", now))
+
     def test_canonical_identity_matches_permalink_variants(self):
         a = "https://www.facebook.com/hanoi_traffic/posts/pfbid02abc?comment_id=1"
         b = "https://m.facebook.com/hanoi_traffic/posts/pfbid02abc/"
@@ -117,6 +125,7 @@ class FacebookCrawlerTests(unittest.TestCase):
 
     def test_reject_and_unresolved_metadata_never_fetch_comments(self):
         for metadata, reason in (
+            ({"metadata_resolved": True, "post_title": "VinBus", "post_context": "xe buýt điện", "post_published_at": "2026-05-31T23:59:59+07:00"}, "out_of_window"),
             ({"metadata_resolved": True, "post_title": "Hà Nội ngập", "post_context": "người dân", "post_published_at": "2026-08-02T00:00:00+07:00"}, "missing_group:electric_bus"),
             ({"metadata_resolved": False, "post_context": "", "post_published_at": "2026-08-02T00:00:00+07:00"}, "metadata_unresolved"),
         ):
@@ -131,7 +140,7 @@ class FacebookCrawlerTests(unittest.TestCase):
             "metadata_resolved": True,
             "post_title": "Review VinBus",
             "post_context": "Trải nghiệm xe buýt điện",
-            "post_published_at": "2026-08-01T00:00:00+07:00",
+            "post_published_at": "2026-06-01T00:00:00+07:00",
         }
         with patch.object(fb, "fetch_post_metadata", return_value=metadata), \
              patch.object(fb, "fetch_post", return_value=("body", [])):
@@ -452,6 +461,28 @@ class FacebookCrawlerTests(unittest.TestCase):
             queued_before = store.pending_count("facebook")
             worker._revisit_sources(store)  # cùng giờ -> dedup, không tăng thêm.
             self.assertEqual(store.pending_count("facebook"), queued_before)
+        finally:
+            store.close()
+            shutil.rmtree(output_dir, ignore_errors=True)
+
+    def test_june_window_backfills_previously_rejected_posts(self):
+        from crawlers.baseline_store import BaselineStore
+
+        output_dir = tempfile.mkdtemp(prefix="fb_backfill_")
+        store = BaselineStore(base_dir=output_dir)
+        try:
+            store.kv_set("facebook_seeded", True)
+            store.kv_set("facebook_comment_reconciliation_seeded", True)
+            store.conn.executemany(
+                "INSERT INTO contexts(platform,context_id,source_url,post_published_at,reason) VALUES ('facebook',?,?,?,'out_of_window')",
+                [("june", "https://facebook.com/posts/june", "2026-06-01T00:00:00+07:00"),
+                 ("may", "https://facebook.com/posts/may", "2026-05-31T23:59:59+07:00")],
+            )
+            worker.seed_queue(store)
+            worker.seed_queue(store)
+            rows = store.conn.execute("SELECT payload FROM discovery_queue WHERE platform='facebook'").fetchall()
+            self.assertEqual([json.loads(row["payload"])["url"] for row in rows],
+                             ["https://facebook.com/posts/june"])
         finally:
             store.close()
             shutil.rmtree(output_dir, ignore_errors=True)

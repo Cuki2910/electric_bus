@@ -28,11 +28,20 @@ def _search_specs():
 
 def seed_queue(store):
     """Nạp (keyword x window) vào discovery_queue nếu chưa seed."""
-    if store.kv_get("youtube_seeded"):
-        return
-    for payload in _search_specs():
-        store.enqueue("youtube", "search", payload, priority=100)
-    store.kv_set("youtube_seeded", True)
+    if not store.kv_get("youtube_seeded"):
+        for payload in _search_specs():
+            store.enqueue("youtube", "search", payload, priority=100)
+        store.kv_set("youtube_seeded", True)
+    if not store.kv_get("youtube_june_2026_backfill_seeded"):
+        # ponytail: mỗi tháng một trang/keyword; tăng max_pages nếu tháng bão hòa 50 kết quả.
+        for month, after, before in (
+            (6, "2026-05-31T17:00:00Z", "2026-06-30T17:00:00Z"),
+            (7, "2026-06-30T17:00:00Z", "2026-07-31T17:00:00Z"),
+        ):
+            for spec in _search_specs():
+                store.enqueue("youtube", "search", {**spec, "after": after, "before": before},
+                              priority=10, dedup_key=f"youtube:window_backfill:{month}:{spec['keyword']}")
+        store.kv_set("youtube_june_2026_backfill_seeded", True)
 
 
 def _revisit_current_year(store):

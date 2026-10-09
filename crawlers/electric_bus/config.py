@@ -27,11 +27,11 @@ def _parse_timestamp(value):
     return parsed.astimezone(HCM_TZ)
 
 def window(now=None):
-    """Publication window: Aug 2026 through now (Vietnam time)."""
+    """Publication window: June 2026 through now (Vietnam time)."""
     now = now or datetime.now(HCM_TZ)
     if now.tzinfo is None:
         now = now.replace(tzinfo=HCM_TZ)
-    return datetime(2026, 8, 1, tzinfo=HCM_TZ), now.astimezone(HCM_TZ)
+    return datetime(2026, 6, 1, tzinfo=HCM_TZ), now.astimezone(HCM_TZ)
 
 def post_in_window(value, now=None):
     published = _parse_timestamp(value)

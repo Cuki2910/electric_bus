@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 import subprocess
+import sys
 import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -16,7 +17,7 @@ from crawlers.facebook import facebook_session as fbs
 from crawlers.facebook import facebook_worker as worker
 from crawlers.electric_bus.config import ELECTRIC_BUS_QUERIES
 
-PRODUCTION_DIR = os.path.abspath("data/outputs/baseline_gate_v2")
+PRODUCTION_DIR = os.path.abspath("data/outputs/baseline_gate_v2/electric_bus")
 QUERY = ELECTRIC_BUS_QUERIES[0]
 
 
@@ -59,6 +60,14 @@ def _production_snapshot():
 
 
 def _youtube_pids():
+    if sys.platform != "win32":
+        result = subprocess.run(["ps", "-Ao", "pid=,command="], capture_output=True, text=True, check=False)
+        return sorted(
+            int(pid)
+            for line in result.stdout.splitlines()
+            if "run_youtube_only.py" in line and "python" in line.lower()
+            for pid in [line.split(maxsplit=1)[0]]
+        )
     command = (
         "Get-CimInstance Win32_Process | "
         "Where-Object { $_.Name -eq 'python.exe' -and $_.CommandLine -like '*run_youtube_only.py*' } | "
@@ -129,7 +138,7 @@ def run_smoke(base_dir, max_comments=10, timeout_seconds=900, max_candidates=5, 
     deadline = time.monotonic() + timeout_seconds
     try:
         run = store.get_or_create_run(hours=1, target_minimum=1)
-        browser = fbs.FacebookSession(headless=True).start()
+        browser = fbs.FacebookSession(profile_dir=os.path.join(base_dir, ".browser_profile"), headless=True).start()
         worker._SESSIONS.browser = browser
         fb.use_browser_session(browser)
 

@@ -4,7 +4,7 @@ Uses YouTube Data API v3 to search topic queries, fetch video descriptions,
 then collect top-level comments and replies.
 
 Queries come from `crawlers/electric_bus/keywords.py`. The search window
-is `2026-08-01` through crawl time.
+is `2026-06-01` through crawl time.
 
 Run through the shared supervisor:
 

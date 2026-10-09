@@ -55,6 +55,17 @@ def seed_queue(store):
         for source in _sources():
             store.enqueue("facebook", "discover", source, priority=priority)
         store.kv_set("facebook_seeded", True)
+    if not store.kv_get("facebook_june_2026_backfill_seeded"):
+        # ponytail: chỉ backfill URL đã audit; mở rộng tìm kiếm lịch sử nếu nguồn bỏ sót bài cũ.
+        for context in store.conn.execute(
+            "SELECT context_id, source_url, post_published_at FROM contexts "
+            "WHERE platform='facebook' AND reason='out_of_window'"
+        ):
+            if fb.post_in_window(context["post_published_at"]):
+                store.enqueue("facebook", "discover", {
+                    "kind": "direct_post", "label": "window_backfill", "url": context["source_url"]
+                }, priority=5, dedup_key=f"facebook:window_backfill:{context['context_id']}")
+        store.kv_set("facebook_june_2026_backfill_seeded", True)
     if store.kv_get("facebook_comment_reconciliation_seeded"):
         return
     for context in store.facebook_contexts_needing_reconciliation():
@@ -199,8 +210,7 @@ def run_once(store, run, deadline_check, batch_id, max_comments=None, allow_revi
                 store.complete_task(task["id"])
                 return {"status": "deadline"}
             identity = fb.canonical_post_identity(post_url)
-            is_reconciliation = source.get("kind") == "direct_post" and source.get("label") == "comment_reconciliation"
-            if identity in seen and not is_reconciliation:
+            if identity in seen and source.get("kind") != "direct_post":
                 continue
             try:
                 metadata, verdict, reason, post_context, comments = fb.fetch_eligible_post(post_url, max_comments=max_comments, source=source)

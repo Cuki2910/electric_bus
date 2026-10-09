@@ -5,7 +5,7 @@ Vietnam electric-bus topic.
 
 Sources are generated from `crawlers/electric_bus/keywords.py`. The post gate runs on
 metadata before comment capture. Publication dates outside the configured
-window (2026-08-01 .. now) are rejected before comments are fetched.
+window (2026-06-01 .. now) are rejected before comments are fetched.
 
 Run through the shared supervisor:
 
