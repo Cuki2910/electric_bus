@@ -1,0 +1,101 @@
+"""Search-query list for the Vietnam electric-bus topic.
+
+Search-side only -- widens recall. The gate that actually accepts/rejects
+candidates is `gate_electric_bus()` (crawlers/topics.py), which matches
+only against the original `ELECTRIC_BUS` term list in keywords.py. Nothing
+here is a gate term: a query below can return a candidate whose caption
+never contains one of the original terms, and that candidate will still be
+rejected by the gate -- these queries exist purely to surface more
+candidates for the gate to filter, the same discover-then-gate split every
+other platform in this repo already uses.
+
+Structure: the unique literal terms from keywords.py's ELECTRIC_BUS
+group (`literal_terms("electric_bus")`, deduped -- the raw list has 5
+duplicate entries), followed by 20 broader/rephrased queries (routes,
+fares, comparisons, complaints/praise, VinBus branding), followed by a
+further 20 queries targeting customer-satisfaction/experience language
+specifically (service quality, reliability, complaint/praise polarity,
+recommendation-worthiness), followed by a small set of Hanoi/HCMC city
+queries -- Vietnam's two biggest electric-bus deployments, so the ones
+most likely to surface genuine Vietnamese customer content -- added
+alongside gate_electric_bus_vietnam() (crawlers/topics.py) to counter
+generic English terms like "electric bus"/"e-bus" pulling in foreign
+(non-Vietnam) results; the earlier queries already skew Hanoi-heavy,
+this set balances in HCMC coverage specifically. All widening recall
+beyond the gate's exact wording, never the gate itself.
+"""
+
+from crawlers.electric_bus.keywords import literal_terms
+
+_BASE_TERMS = tuple(literal_terms("electric_bus"))
+
+_EXPANDED_QUERIES = (
+    "đi xe buýt điện Hà Nội",
+    "trạm sạc xe buýt điện",
+    "giá vé xe buýt điện",
+    "lộ trình VinBus",
+    "tuyến VinBus Hà Nội",
+    "cảm nhận đi VinBus",
+    "sự cố xe buýt điện",
+    "xe buýt điện có tốt không",
+    "chuyến xe buýt điện đầu tiên",
+    "trải nghiệm đi VinBus",
+    "xe điện VinFast công cộng",
+    "buýt điện thông minh",
+    "dự án xe buýt điện Hà Nội",
+    "chính sách vé xe buýt điện",
+    "so sánh xe buýt điện xe buýt thường",
+    "lịch trình xe buýt điện",
+    "hình ảnh xe buýt điện",
+    "video xe buýt điện",
+    "phản hồi xe buýt điện",
+    "xe buýt điện VinFast Hà Nội",
+)
+
+_SATISFACTION_QUERIES = (
+    "hài lòng xe buýt điện",
+    "không hài lòng xe buýt điện",
+    "dịch vụ xe buýt điện",
+    "chất lượng dịch vụ VinBus",
+    "thái độ nhân viên xe buýt điện",
+    "tài xế xe buýt điện",
+    "xe buýt điện có đáng tin cậy không",
+    "xe buýt điện có đúng giờ không",
+    "xe buýt điện có sạch sẽ không",
+    "xe buýt điện có an toàn không",
+    "phàn nàn xe buýt điện",
+    "khiếu nại VinBus",
+    "khen xe buýt điện",
+    "chê xe buýt điện",
+    "có nên đi xe buýt điện không",
+    "có nên đi VinBus không",
+    "VinBus đáng giá tiền không",
+    "cảm giác đi xe buýt điện",
+    "ấn tượng xe buýt điện",
+    "xe buýt điện so với xe máy",
+)
+
+_CITY_QUERIES = (
+    "xe buýt điện TPHCM",
+    "xe buýt điện Sài Gòn",
+    "xe buýt điện Hồ Chí Minh",
+    "VinBus TPHCM",
+    "VinBus Sài Gòn",
+    "VinBus Hồ Chí Minh",
+    "VinBus Hà Nội",
+)
+
+
+def _dedup_preserve_order(terms):
+    seen, out = set(), []
+    for term in terms:
+        key = term.strip().lower()
+        if key and key not in seen:
+            seen.add(key)
+            out.append(term.strip())
+    return out
+
+
+KEYWORDS = tuple(_dedup_preserve_order(
+    _BASE_TERMS + _EXPANDED_QUERIES + _SATISFACTION_QUERIES + _CITY_QUERIES
+))
