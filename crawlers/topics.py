@@ -60,3 +60,15 @@ def is_on_topic_threads(post_text, hashtags=None, source=None):
     ``source`` accepted for call-site compatibility, not consulted."""
     hashtag_blob = " ".join((hashtags or []))
     return gate_electric_bus_vietnam(post_text or "", hashtag_blob)
+
+
+def is_on_topic_tiktok(caption, hashtags, source=None):
+    """TikTok wrapper: caption + a plain space-joined hashtag blob.
+    ``source`` accepted for call-site compatibility, not consulted."""
+    hashtag_blob = " ".join((hashtags or []))
+    return gate_electric_bus_vietnam(caption or "", hashtag_blob)
+
+
+def is_on_topic_news(title, body="", source=None):
+    """News wrapper: same shape as gate_electric_bus_vietnam()."""
+    return gate_electric_bus_vietnam(title, body)
