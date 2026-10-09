@@ -900,8 +900,10 @@ def discover_posts(source):
 
 
 def _capture_post_metadata_page(page):
+    # These pages usually have no role=article; do not burn 30s waiting for one.
+    no_article = re.search(r"/(?:photo|reel|watch|videos)\b", page.url or "")
     try:
-        page.wait_for_selector('div[role="article"]', timeout=30000)
+        page.wait_for_selector('div[role="article"]', timeout=8000 if no_article else 30000)
     except Exception:
         # photo/watch/reel pages have no role=article; still run the capture so the
         # creation_time fallback fills the date (body comes from creation_story).
