@@ -49,6 +49,7 @@ def snapshot(rng):
         times = [start + step * (i + 1) for i in range(n)]
         series = {p: [sum(1 for q, _, t in rows if q == p and t < start)] * n
                   for p in ("facebook", "youtube")}
+        base0 = {p: series[p][0] for p in series}
         for p in series:
             mine = sorted(t for q, _, t in rows if q == p)
             base, j, out = series[p][0], 0, []
@@ -83,7 +84,7 @@ def snapshot(rng):
             "run": dict(run) if run else None,
             "status": {p: _kv(c, f"{p}_status") for p in ("facebook", "youtube")},
             "totals": totals, "total": len(rows), "recent_per_hour": recent,
-            "times": [t.isoformat() for t in times], "series": series,
+            "times": [t.isoformat() for t in times], "series": series, "base": base0,
             "reasons": reasons, "queue": queue, "events": events,
         }
     finally:
@@ -165,7 +166,7 @@ select{font:inherit;background:var(--surface);color:var(--ink);border:1px solid 
 <button data-r="all" aria-pressed="false">Tất cả</button></div></div>
 <div class="grid" id="tiles"></div>
 <div class="stack">
-<div class="card"><h2>Comment tích luỹ</h2>
+<div class="card"><h2>Comment mới (từ đầu khoảng)</h2>
 <div class="legend"><span><span class="key" style="border-color:var(--fb)"></span>Facebook</span><span><span class="key" style="border-color:var(--yt)"></span>YouTube</span>
 <button class="btn" id="tbl" style="margin-left:auto;padding:2px 10px">Xem bảng</button></div>
 <div class="chart" id="chart"></div><div id="tblwrap" class="scroll" hidden></div></div>
@@ -206,21 +207,20 @@ function tiles(){const d=data,t=d.totals,tar=(d.run&&d.run.target_minimum)||TARG
 function chart(){const host=$("#chart");host.querySelector("svg")?.remove();
  const d=data,W=Math.max(320,host.clientWidth||600),H=260,m={l:46,r:12,t:10,b:24},iw=W-m.l-m.r,ih=H-m.t-m.b;
  const xs=d.times.map(t=>+new Date(t)),ser=[{k:"facebook",n:"Facebook",c:css("--fb")},{k:"youtube",n:"YouTube",c:css("--yt")}];
- const all=ser.flatMap(s=>d.series[s.k]);let lo=Math.min(...all),hi=Math.max(...all);if(hi===lo)hi=lo+1;
- const pad=Math.max(1,(hi-lo)*.08);lo=Math.max(0,Math.floor(lo-pad));hi=Math.ceil(hi+pad);
+ const dl=k=>d.series[k].map(v=>v-d.base[k]),all=ser.flatMap(s=>dl(s.k));let lo=0,hi=Math.max(...all,1);hi=Math.ceil(hi*1.08);
  const X=t=>m.l+(t-xs[0])/(xs[xs.length-1]-xs[0]||1)*iw,Y=v=>m.t+ih-(v-lo)/(hi-lo)*ih;
- const svg=sv("svg",{viewBox:`0 0 ${W} ${H}`,role:"img","aria-label":"Comment tích luỹ theo thời gian cho Facebook và YouTube"});
+ const svg=sv("svg",{viewBox:`0 0 ${W} ${H}`,role:"img","aria-label":"Comment mới theo thời gian cho Facebook và YouTube"});
  for(let i=0;i<=4;i++){const v=lo+(hi-lo)*i/4,y=Y(v);svg.append(sv("line",{x1:m.l,x2:W-m.r,y1:y,y2:y,stroke:i?css("--grid"):css("--axis"),"stroke-width":1}),sv("text",{x:m.l-6,y:y+4,"text-anchor":"end"},fmt(Math.round(v))))}
  for(let i=0;i<=4;i++){const t=xs[0]+(xs[xs.length-1]-xs[0])*i/4;svg.append(sv("text",{x:X(t),y:H-6,"text-anchor":i==0?"start":i==4?"end":"middle"},hm(new Date(t).toISOString(),(xs[xs.length-1]-xs[0])>864e5)))}
- for(const s of ser){svg.append(sv("polyline",{points:xs.map((t,i)=>X(t)+","+Y(d.series[s.k][i])).join(" "),fill:"none",stroke:s.c,"stroke-width":2,"stroke-linejoin":"round","stroke-linecap":"round"}))}
+ for(const s of ser){svg.append(sv("polyline",{points:xs.map((t,i)=>X(t)+","+Y(dl(s.k)[i])).join(" "),fill:"none",stroke:s.c,"stroke-width":2,"stroke-linejoin":"round","stroke-linecap":"round"}))}
  const cross=sv("line",{y1:m.t,y2:m.t+ih,stroke:css("--axis"),"stroke-width":1,visibility:"hidden"}),dots=ser.map(s=>sv("circle",{r:4,fill:s.c,stroke:css("--surface"),"stroke-width":2,visibility:"hidden"}));
  svg.append(cross,...dots);
  const hit=sv("rect",{x:m.l,y:m.t,width:iw,height:ih,fill:"transparent",tabindex:0});svg.append(hit);
  const at=(cx,cy)=>{const r=svg.getBoundingClientRect(),px=(cx-r.left)/r.width*W,t=xs[0]+(px-m.l)/iw*(xs[xs.length-1]-xs[0]);
   let bi=0;xs.forEach((x,i)=>{if(Math.abs(x-t)<Math.abs(xs[bi]-t))bi=i});
   cross.setAttribute("x1",X(xs[bi]));cross.setAttribute("x2",X(xs[bi]));cross.setAttribute("visibility","visible");
-  ser.forEach((s,i)=>{dots[i].setAttribute("cx",X(xs[bi]));dots[i].setAttribute("cy",Y(d.series[s.k][bi]));dots[i].setAttribute("visibility","visible")});
-  showTip(host,cx,cy,ser.map(s=>({color:s.c,value:fmt(d.series[s.k][bi]),label:s.n})),hm(d.times[bi],true))};
+  ser.forEach((s,i)=>{dots[i].setAttribute("cx",X(xs[bi]));dots[i].setAttribute("cy",Y(dl(s.k)[bi]));dots[i].setAttribute("visibility","visible")});
+  showTip(host,cx,cy,ser.map(s=>({color:s.c,value:"+"+fmt(dl(s.k)[bi])+" (tổng "+fmt(d.series[s.k][bi])+")",label:s.n})),hm(d.times[bi],true))};
  hit.addEventListener("pointermove",e=>at(e.clientX,e.clientY));
  hit.addEventListener("pointerleave",()=>{hideTip();cross.setAttribute("visibility","hidden");dots.forEach(x=>x.setAttribute("visibility","hidden"))});
  host.append(svg);
