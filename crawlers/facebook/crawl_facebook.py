@@ -611,6 +611,28 @@ def _scroll_page(rounds):
     return action
 
 
+# Facebook virtualizes the feed: posts scrolled past are removed from the DOM, so reading
+# only the final DOM keeps ~5-10% of what was seen. Collect each item's links per step.
+_FEED_ITEM_LINKS_JS = """() => {
+    let items = [...document.querySelectorAll('div[role="feed"] > div')];
+    if (!items.length) items = [...document.querySelectorAll('div[role="article"]')];
+    return items.map(it => [...it.querySelectorAll('a[href]')].map(a => a.getAttribute('href') || ''))
+        .filter(links => links.length);
+}"""
+
+def _scroll_collect_links(rounds, collected):
+    """Like _scroll_page, but appends every feed item's hrefs to `collected` at each step."""
+    def action(page):
+        collected.extend(page.evaluate(_FEED_ITEM_LINKS_JS))
+        for _ in range(rounds):
+            page.mouse.wheel(0, 3000)
+            page.wait_for_timeout(1500)
+            collected.extend(page.evaluate(_FEED_ITEM_LINKS_JS))
+        return page
+
+    return action
+
+
 def _scroll_and_expand_page(post_url, rounds, max_comments=None, expected_body=""):
     def action(page):
         is_video_page = content_type_for_url(post_url) in ("reel", "video")
@@ -794,30 +816,32 @@ def _fetch(url, page_action=None, wait_selector=None):
     raise RuntimeError(f"Fetch failed after 3 attempts: {url}")
 
 
-def _post_urls_from_items(items, max_posts):
+def _post_url_from_hrefs(hrefs):
+    """One feed item's links -> canonical post URL (direct link preferred, photo as fallback)."""
+    direct_href = None
+    photo_href = None
+    for href in hrefs:
+        if not href:
+            continue
+        if SELECTORS["direct_post_link"].search(href):
+            direct_href = href
+            break
+        if photo_href is None and SELECTORS["photo_link"].search(href):
+            photo_href = href
+    if direct_href:
+        return canonical_post_url(direct_href)
+    if photo_href:
+        # Giữ chính photo fbid làm target identity; không resolve qua link generic
+        # /reel/ vì Facebook có thể điều hướng sang Reel không liên quan.
+        photo_url = canonical_post_url(photo_href)
+        return photo_url if canonical_post_identity(photo_url) not in ("/photo", "/photo/") else None
+    return None
+
+def _post_urls_from_href_groups(href_groups, max_posts):
     post_urls = []
     seen_ids = set()
-    for item in items:
-        direct_href = None
-        photo_href = None
-        for link in item.css("a[href]"):
-            href = link.attrib.get("href", "")
-            if not href:
-                continue
-            if SELECTORS["direct_post_link"].search(href):
-                direct_href = href
-                break
-            if photo_href is None and SELECTORS["photo_link"].search(href):
-                photo_href = href
-        if direct_href:
-            post_url = canonical_post_url(direct_href)
-        elif photo_href:
-            # Giữ chính photo fbid làm target identity; không resolve qua link generic
-            # /reel/ vì Facebook có thể điều hướng sang Reel không liên quan.
-            photo_url = canonical_post_url(photo_href)
-            post_url = photo_url if canonical_post_identity(photo_url) not in ("/photo", "/photo/") else None
-        else:
-            post_url = None
+    for hrefs in href_groups:
+        post_url = _post_url_from_hrefs(hrefs)
         if not post_url:
             continue
         identity = canonical_post_identity(post_url)
@@ -831,6 +855,11 @@ def _post_urls_from_items(items, max_posts):
             break
     return post_urls
 
+def _post_urls_from_items(items, max_posts, extra_href_groups=()):
+    """Post URLs from feed items; `extra_href_groups` (collected while scrolling) go first."""
+    groups = list(extra_href_groups)
+    groups += [[link.attrib.get("href", "") for link in item.css("a[href]")] for item in items]
+    return _post_urls_from_href_groups(groups, max_posts)
 
 def _resolve_permalink_via_photo(photo_href):
     resp = _fetch(
@@ -853,11 +882,12 @@ def _resolve_permalink_via_photo(photo_href):
 def search_posts(query, max_posts):
     url = f"{ROOT}/search/posts/?q={urllib.parse.quote(query)}"
     # wait_selector: chờ feed thật sự hiện ra trước khi scrape
-    resp = _fetch(url, page_action=_scroll_page(SCROLL_ROUNDS), wait_selector='div[role="feed"]')
+    collected = []
+    resp = _fetch(url, page_action=_scroll_collect_links(SCROLL_ROUNDS, collected), wait_selector='div[role="feed"]')
     items = resp.css(SELECTORS["feed_items"])
-    if not items:
+    if not items and not collected:
         raise CookieExpiredError("No search posts found. Cookie may be expired.")
-    return _post_urls_from_items(items, max_posts)
+    return _post_urls_from_items(items, max_posts, collected)
 
 def search_videos(query, max_posts):
     url = f"{ROOT}/search/videos/?q={urllib.parse.quote(query)}"
@@ -878,13 +908,14 @@ def search_videos(query, max_posts):
 
 
 def page_posts(url, max_posts):
+    collected = []
     resp = _fetch(
         url,
-        page_action=_scroll_page(SCROLL_ROUNDS),
+        page_action=_scroll_collect_links(SCROLL_ROUNDS, collected),
         wait_selector='div[role="feed"], div[role="article"]',
     )
     items = resp.css(SELECTORS["feed_items"]) or resp.css('div[role="article"]')
-    return _post_urls_from_items(items, max_posts)
+    return _post_urls_from_items(items, max_posts, collected)
 
 
 def discover_posts(source):

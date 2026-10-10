@@ -94,6 +94,27 @@ class FacebookCrawlerTests(unittest.TestCase):
         self.assertEqual(metadata["post_published_at"], "")
         self.assertEqual(fb.gate_metadata(metadata), ("accept", "electric_bus"))
 
+    def test_collected_links_survive_feed_virtualization(self):
+        # Items scrolled out of the DOM still count: collected hrefs come first, deduped.
+        collected = [
+            ["/groups/g/posts/111/", "/user/1"],
+            ["/photo/?fbid=222", "/user/2"],
+            ["/user/3"],
+            ["/groups/g/posts/111/?__cft__=x"],
+        ]
+        urls = fb._post_urls_from_items([], 10, collected)
+        self.assertEqual([fb.canonical_post_identity(u) for u in urls], ["111", "222"])
+        self.assertEqual(len(fb._post_urls_from_items([], 1, collected)), 1)
+
+    def test_collected_links_precede_final_dom_items(self):
+        class Link:
+            attrib = {"href": "/groups/g/posts/999/"}
+        class Item:
+            def css(self, selector):
+                return [Link()]
+        urls = fb._post_urls_from_items([Item()], 10, [["/groups/g/posts/111/"]])
+        self.assertEqual([fb.canonical_post_identity(u) for u in urls], ["111", "999"])
+
     def test_extract_owner_picks_actor_nearest_creation_time(self):
         html = (
             '{"__typename":"User","name":"Nguoi Binh Luan","url":"https:\\/\\/web.facebook.com\\/other"}' + "x" * 100000
