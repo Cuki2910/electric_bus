@@ -35,5 +35,18 @@ class TopicConfigTests(unittest.TestCase):
         self.assertEqual(gate_electric_bus("", "Hà Nội ngập nặng")[0], "reject")
 
 
+
+
+class FacebookGroupSourceTests(unittest.TestCase):
+    def test_vinbus_groups_are_public_page_sources_with_owner_name(self):
+        from crawlers.electric_bus.config import facebook_sources
+        groups = [x for x in facebook_sources() if x["source_class"] == "electric_bus_group"]
+        self.assertEqual(len(groups), 3)
+        for source in groups:
+            self.assertEqual(source["kind"], "public_page")
+            self.assertIn("/groups/", source["url"])
+            self.assertTrue(source["owner_name"])
+
+
 if __name__ == "__main__":
     unittest.main()

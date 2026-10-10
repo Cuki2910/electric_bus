@@ -59,6 +59,15 @@ FACEBOOK_PAGES = (
     ("vinbus_official", "https://www.facebook.com/vinbus.official/"),
 )
 
+# Public VinBus groups (measured 2026-10-10: 55/75 posts pass the gate, vs 4/100 for
+# general Hanoi/HCMC bus groups, which are deliberately not listed). Group name is carried
+# on the source because the post HTML does not expose it.
+FACEBOOK_GROUPS = (
+    ("vinbus_group_official", "https://www.facebook.com/groups/vinbus.official/", "VinBus"),
+    ("vinbus_group_vietnam", "https://www.facebook.com/groups/vinbusvietnam/", "VinBus Việt Nam"),
+    ("vinbus_group_e01_e08", "https://www.facebook.com/groups/1458515971322273/", "Vinbus E01-E02-E03-E08"),
+)
+
 def facebook_sources():
     sources = [
         {
@@ -69,6 +78,17 @@ def facebook_sources():
             "max_posts": 20,
         }
         for name, url in FACEBOOK_PAGES
+    ]
+    sources += [
+        {
+            "kind": "public_page",
+            "label": f"electric_bus_{name}",
+            "source_class": "electric_bus_group",
+            "url": url,
+            "max_posts": 25,
+            "owner_name": title,
+        }
+        for name, url, title in FACEBOOK_GROUPS
     ]
     for index, query in enumerate(ELECTRIC_BUS_QUERIES, 1):
         for kind, tag in (("search", "post"), ("video_search", "video")):

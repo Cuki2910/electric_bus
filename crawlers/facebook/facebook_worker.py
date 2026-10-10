@@ -238,7 +238,7 @@ def run_once(store, run, deadline_check, batch_id, max_comments=None, allow_revi
                 "co_thanh_pho_khac": int(co_thanh_pho_khac(metadata.get("post_title", ""), metadata.get("post_context", ""))),
                 "discovery_source": source.get("label", ""), "discovery_query": source.get("query", ""),
                 "state": "accepted" if verdict == "accept" else "rejected",
-                "page_or_group_name": metadata.get("page_or_group_name", ""),
+                "page_or_group_name": source.get("owner_name") or metadata.get("page_or_group_name", ""),
                 "owner_url": metadata.get("owner_url", ""),
                 "owner_type": metadata.get("owner_type", ""),
                 "crawled_at": datetime.now(ZoneInfo("Asia/Ho_Chi_Minh")).isoformat(),
