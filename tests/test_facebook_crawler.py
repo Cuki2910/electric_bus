@@ -585,3 +585,19 @@ class _FakeAuthResponse:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SessionRecycleTests(unittest.TestCase):
+    def test_recycle_only_when_old(self):
+        import time
+        from unittest.mock import MagicMock, patch
+        from crawlers.facebook import facebook_worker as worker
+        old = MagicMock(); new = MagicMock(); new.ensure_login.return_value = (fbs.AUTH_OK, {})
+        worker._SESSIONS.browser, worker._SESSIONS.started = old, time.monotonic()
+        self.assertIsNone(worker._recycle_if_old()); old.close.assert_not_called()
+        worker._SESSIONS.started = time.monotonic() - worker._SESSION_MAX_AGE_SECONDS - 1
+        with patch.object(fbs, "FacebookSession") as cls:
+            cls.return_value.start.return_value = new
+            self.assertIsNone(worker._recycle_if_old())
+        old.close.assert_called_once(); self.assertIs(worker._SESSIONS.browser, new)
+        worker.close_session()

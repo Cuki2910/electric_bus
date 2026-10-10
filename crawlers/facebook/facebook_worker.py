@@ -19,6 +19,8 @@ from crawlers.topics import co_thanh_pho_khac, matched_groups
 
 _SESSIONS = threading.local()
 _MAX_COMMENT_RECONCILIATION_RETRIES = 3
+# Chromium renderer phình ~2.6GB/giờ khi cuộn FB; restart giữa hai bài để trả RAM (profile/cookie giữ nguyên).
+_SESSION_MAX_AGE_SECONDS = 30 * 60
 
 
 def _session():
@@ -26,7 +28,19 @@ def _session():
     if browser is None:
         browser = fbs.FacebookSession().start()
         _SESSIONS.browser = browser
+        _SESSIONS.started = time.monotonic()
     return browser
+
+def _recycle_if_old():
+    """Đóng và mở lại browser nếu quá tuổi. Chỉ gọi giữa hai bài. Trả None hoặc dict auth_required."""
+    started = getattr(_SESSIONS, "started", None)
+    if started is None or time.monotonic() - started < _SESSION_MAX_AGE_SECONDS:
+        return None
+    close_session()
+    browser = _session()
+    fb.use_browser_session(browser)
+    state, detail = browser.ensure_login()
+    return None if state == fbs.AUTH_OK else {"state": state, "detail": detail}
 
 
 def close_session():
@@ -34,6 +48,7 @@ def close_session():
     if browser is not None:
         browser.close()
         del _SESSIONS.browser
+        _SESSIONS.started = None
     fb.use_browser_session(None)
 
 
@@ -194,6 +209,9 @@ def run_once(store, run, deadline_check, batch_id, max_comments=None, allow_revi
         store.kv_set("facebook_revisited_this_pass", False)
 
         source = task["payload"]
+        stale_auth = _recycle_if_old()
+        if stale_auth:
+            return _auth_required(store, task, stale_auth["state"])
         try:
             post_urls = fb.discover_posts(source)
         except fbs.FacebookAuthRequiredError as exc:
@@ -212,6 +230,9 @@ def run_once(store, run, deadline_check, batch_id, max_comments=None, allow_revi
             identity = fb.canonical_post_identity(post_url)
             if identity in seen and source.get("kind") != "direct_post":
                 continue
+            stale_auth = _recycle_if_old()
+            if stale_auth:
+                return _auth_required(store, task, stale_auth["state"])
             try:
                 metadata, verdict, reason, post_context, comments = fb.fetch_eligible_post(post_url, max_comments=max_comments, source=source)
             except fbs.FacebookAuthRequiredError as exc:
