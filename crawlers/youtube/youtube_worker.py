@@ -52,11 +52,22 @@ def _revisit_current_year(store):
     quota search.list khi hàng đợi rỗng được kiểm tra lại mỗi vài phút.
     """
     now = datetime.now(timezone.utc)
-    stamp = now.strftime("%Y%m%d%H")
+    # Hourly revisit of all keywords burned ~2700 quota units/hour (27 searches x 100) for
+    # ~0-1 new accepted videos per hour (measured from contexts), exhausting the daily
+    # quota in under 4 hours. Bucket by REVISIT_HOURS and use only distinct queries.
+    stamp = f"{now:%Y%m%d}{now.hour // REVISIT_HOURS:02d}"
     for payload in _search_specs():
+        if payload["keyword"] not in REVISIT_KEYWORDS:
+            continue
         store.enqueue("youtube", "search", payload, priority=50,
                       dedup_key=f"youtube:revisit:{payload['topic']}:{payload['keyword']}:{stamp}")
 
+
+REVISIT_HOURS = 6
+# One term per spelling family; the gate, not the query, decides what is kept.
+REVISIT_KEYWORDS = frozenset({
+    "xe buýt điện", "xe bus điện", "bus điện", "electric bus", "VinBus", "xe điện công cộng",
+})
 
 _MAX_REFRESH_RETRIES = 3  # deficit không giảm sau ngần này lần (comment API đếm nhưng không lấy được) -> ngừng re-queue.
 

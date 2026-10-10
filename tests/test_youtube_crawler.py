@@ -441,3 +441,21 @@ class YouTubeCrawlerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class RevisitQuotaTests(unittest.TestCase):
+    def test_revisit_uses_few_keywords_and_six_hour_buckets(self):
+        from datetime import datetime, timezone
+        from crawlers.youtube import youtube_worker
+
+        def keys_at(hour):
+            store = MagicMock()
+            with patch.object(youtube_worker, "datetime") as dt:
+                dt.now.return_value = datetime(2026, 10, 10, hour, 30, tzinfo=timezone.utc)
+                youtube_worker._revisit_current_year(store)
+            return [call.kwargs["dedup_key"] for call in store.enqueue.call_args_list]
+
+        a, b, c = keys_at(0), keys_at(5), keys_at(6)
+        self.assertEqual(a, b)                      # same 6h bucket: deduped by the store
+        self.assertTrue(set(a).isdisjoint(c))       # next bucket: new tasks
+        self.assertEqual(len(a), len(youtube_worker.REVISIT_KEYWORDS))
+        self.assertLess(len(a) * 100, 2700)         # was 27 searches (2700 units) every hour
