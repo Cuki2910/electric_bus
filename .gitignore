@@ -5,5 +5,65 @@ __pycache__/
 .DS_Store
 .env
 .secrets/
+crawl.db
 data/outputs/**/.browser_profile/
 data/outputs/facebook_smoke/
+
+data/outputs/*
+!data/outputs/youtube/
+!data/outputs/youtube/**
+
+# Only these specific tiktok/news/threads files are public -- everything
+# else in these directories (browser profile, spike dumps, other batches)
+# stays gitignored. A directory that's ignored won't be traversed for
+# negation patterns targeting files inside it, so each directory must be
+# re-included before re-ignoring its contents and allowlisting specific
+# files. Mirrors the same pattern used in the parent crawl_chiYen repo,
+# minus the flood_transport entries (this repo is electric_bus-only).
+!data/outputs/tiktok/
+data/outputs/tiktok/*
+!data/outputs/tiktok/tiktok_electric_bus_discovery_20260927_2156.csv
+!data/outputs/tiktok/tiktok_electric_bus_20260927_2309.jsonl
+!data/outputs/tiktok/tiktok_electric_bus_20260927_2314.jsonl
+!data/outputs/tiktok/tiktok_electric_bus_discovery_20261008_0004.csv
+!data/outputs/tiktok/tiktok_electric_bus_20261008_1059.jsonl
+
+!data/outputs/news/
+data/outputs/news/*
+!data/outputs/news/discovery_news_electric_bus_20260927_2156.csv
+!data/outputs/news/news_electric_bus_20260928_0833.jsonl
+!data/outputs/news/discovery_news_electric_bus_20261008_1630.csv
+
+!data/outputs/threads/
+data/outputs/threads/*
+!data/outputs/threads/threads_electric_bus_discovery_20261001_2329.csv
+!data/outputs/threads/threads_electric_bus_20261002_1604.jsonl
+!data/outputs/threads/threads_electric_bus_discovery_20261008_1630.csv
+
+data/inputs/*
+!data/inputs/tiktok/
+data/inputs/tiktok/*
+!data/inputs/tiktok/urls_electric_bus_20260927_2156.csv
+!data/inputs/tiktok/urls_electric_bus_20261008_0004.csv
+
+!data/inputs/news/
+data/inputs/news/*
+!data/inputs/news/urls_electric_bus_20260927_2156.csv
+
+!data/inputs/threads/
+data/inputs/threads/*
+!data/inputs/threads/urls_electric_bus_20261001_2329.csv
+
+# Publish current baseline results; retain logs and snapshots locally.
+!data/outputs/baseline_gate_v2/
+data/outputs/baseline_gate_v2/*
+!data/outputs/baseline_gate_v2/electric_bus/
+data/outputs/baseline_gate_v2/electric_bus/*
+!data/outputs/baseline_gate_v2/electric_bus/crawl.db
+!data/outputs/baseline_gate_v2/electric_bus/facebook_comments.csv
+!data/outputs/baseline_gate_v2/electric_bus/facebook_post_audit.csv
+!data/outputs/baseline_gate_v2/electric_bus/final_report.md
+!data/outputs/baseline_gate_v2/electric_bus/progress.json
+!data/outputs/baseline_gate_v2/electric_bus/youtube_comments.csv
+!data/outputs/baseline_gate_v2/electric_bus/youtube_post_audit.csv
+data/outputs/facebook/
