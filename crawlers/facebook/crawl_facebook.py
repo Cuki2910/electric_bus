@@ -976,6 +976,38 @@ def _parse_absolute_post_time(raw):
     return ""
 
 
+# Key order inside the actor object varies (a nested profile_picture may sit between
+# __typename and name), so anchor on "id"+"name"+"url" appearing close together.
+_OWNER_ACTOR = re.compile(
+    r'"name":"((?:[^"\\]|\\.){1,120})"[^{}]{0,200}?"url":"(https:\\/\\/(?:web|www)\.facebook\.com\\/[^"]+)"'
+)
+
+def extract_owner(html_content, post_url=""):
+    """Owner of the target post: the actor object closest to the post's creation_time.
+
+    Facebook types pages as "User" too, so page vs profile is not recoverable from the
+    HTML; only the /groups/ URL shape is a reliable signal (ponytail: group name is not
+    extracted yet -- verify against a real group post before trusting owner_type=group).
+    """
+    if isinstance(html_content, bytes):
+        html_content = html_content.decode("utf-8", errors="replace")
+    html_content = html_content or ""
+    anchor = re.search(r'"creation_time":\d{10}', html_content)
+    best = None
+    if anchor:
+        for m in _OWNER_ACTOR.finditer(html_content):
+            dist = abs(m.start() - anchor.start())
+            if best is None or dist < best[0]:
+                best = (dist, m)
+    name = url = ""
+    if best and best[0] <= 50000:
+        name = json.loads('"%s"' % best[1].group(1))
+        url = best[1].group(2).replace("\\/", "/").replace("web.facebook.com", "www.facebook.com")
+    m = re.search(r"facebook\.com/groups/([^/?#]+)", post_url or "")
+    if m:
+        return {"page_or_group_name": "", "owner_url": f"https://www.facebook.com/groups/{m.group(1)}", "owner_type": "group"}
+    return {"page_or_group_name": name, "owner_url": url, "owner_type": "page_or_profile" if url else ""}
+
 def _metadata_from_response(resp, post_url):
     html = resp.css("html")
     raw = html[0].attrib.get(_METADATA_DATA_ATTR, "{}") if html else "{}"
@@ -1000,6 +1032,7 @@ def _metadata_from_response(resp, post_url):
         "post_published_at_raw": published_raw,
         "post_published_at": _parse_absolute_post_time(published_raw),
         "metadata_resolved": bool(body.strip() and (creation_story or captured.get("resolved"))),
+        **extract_owner(resp.html_content, post_url),
     }
 
 

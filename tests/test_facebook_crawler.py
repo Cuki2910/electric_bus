@@ -94,6 +94,19 @@ class FacebookCrawlerTests(unittest.TestCase):
         self.assertEqual(metadata["post_published_at"], "")
         self.assertEqual(fb.gate_metadata(metadata), ("accept", "electric_bus"))
 
+    def test_extract_owner_picks_actor_nearest_creation_time(self):
+        html = (
+            '{"__typename":"User","name":"Nguoi Binh Luan","url":"https:\\/\\/web.facebook.com\\/other"}' + "x" * 100000
+            + '{"name":"VinBus","id":"1","url":"https:\\/\\/web.facebook.com\\/vinbus.official"}'
+            + '"creation_time":1790762725'
+        )
+        owner = fb.extract_owner(html, "https://www.facebook.com/photo?fbid=1")
+        self.assertEqual(owner, {"page_or_group_name": "VinBus", "owner_url": "https://www.facebook.com/vinbus.official", "owner_type": "page_or_profile"})
+
+    def test_extract_owner_group_url_and_missing(self):
+        self.assertEqual(fb.extract_owner("", "https://www.facebook.com/groups/123/posts/9")["owner_type"], "group")
+        self.assertEqual(fb.extract_owner("<html></html>", "https://www.facebook.com/photo?fbid=1")["owner_url"], "")
+
     def test_absolute_post_time_is_extracted_from_tooltip_text(self):
         raw = "Đã chia sẻ: 25/07/2026 14:30"
         self.assertEqual(fb._parse_absolute_post_time(raw), "2026-07-25T14:30:00")

@@ -30,7 +30,7 @@ CONTEXT_EXPORT_FIELDS = [
     "metadata_resolved", "matched_groups", "co_thanh_pho_khac",
     "discovery_source", "discovery_query", "expected_comment_count",
     "captured_comment_count", "missing_comment_count", "comment_capture_status",
-    "comment_retry_count", "crawled_at",
+    "comment_retry_count", "page_or_group_name", "owner_url", "owner_type", "crawled_at",
 ]
 
 _SCHEMA = """
@@ -164,6 +164,9 @@ class BaselineStore:
             ("missing_comment_count", "INTEGER"),
             ("comment_capture_status", "TEXT"),
             ("comment_retry_count", "INTEGER DEFAULT 0"),
+            ("page_or_group_name", "TEXT"),
+            ("owner_url", "TEXT"),
+            ("owner_type", "TEXT"),
         ):
             if column not in context_columns:
                 self.conn.execute(f"ALTER TABLE contexts ADD COLUMN {column} {definition}")
@@ -312,7 +315,8 @@ class BaselineStore:
                 "metadata_resolved", "matched_groups", "co_thanh_pho_khac",
                 "discovery_source", "discovery_query", "expected_comment_count",
                 "captured_comment_count", "missing_comment_count", "comment_capture_status",
-                "comment_retry_count", "state", "crawled_at"]
+                "comment_retry_count", "state", "crawled_at",
+                "page_or_group_name", "owner_url", "owner_type"]
         values = [ctx.get(k) for k in cols]
         placeholders = ",".join("?" for _ in cols)
         updates = ",".join(f"{k}=excluded.{k}" for k in cols if k not in ("platform", "context_id"))
