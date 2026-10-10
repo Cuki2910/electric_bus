@@ -20,5 +20,3 @@
 | YouTube accepted videos | 423 |
 | YouTube rejected videos | 2323 |
 
-> [!IMPORTANT]
-> Dữ liệu YouTube lấy qua API phải xóa/refresh trong 30 ngày kể từ crawled_at.
