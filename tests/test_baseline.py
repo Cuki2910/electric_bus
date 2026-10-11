@@ -8,6 +8,8 @@ import tempfile
 import shutil
 import sqlite3
 import unittest
+from unittest.mock import patch
+from urllib.request import urlopen
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 os.environ.setdefault("YOUTUBE_API_KEY", "test")
@@ -18,6 +20,33 @@ from crawlers.baseline_store import BaselineStore, DB_FILE, _SCHEMA
 
 COMMENT_TIME = "Thứ bảy, 11 Tháng 7, 2026 lúc 17:43"
 COMMENT_TIME_ISO = "2026-07-11T17:43:00+07:00"
+
+
+class MonitorTest(unittest.TestCase):
+    def test_monitor_serves_dashboard_and_reuses_busy_port(self):
+        from http.server import ThreadingHTTPServer
+        from crawlers.baseline_runner import _start_monitor
+
+        servers = []
+
+        def bind_monitor(address, handler):
+            port = servers[0].server_port if servers else 0
+            server = ThreadingHTTPServer((address[0], port), handler)
+            servers.append(server)
+            return server
+
+        try:
+            with patch("crawlers.monitor.ThreadingHTTPServer", side_effect=bind_monitor):
+                server = _start_monitor()
+                with urlopen(f"http://127.0.0.1:{server.server_port}/", timeout=3) as response:
+                    self.assertEqual(response.status, 200)
+                    self.assertIn(b"Crawl Monitor", response.read())
+                self.assertIsNone(_start_monitor())
+                self.assertEqual(len(servers), 1)
+        finally:
+            for server in servers:
+                server.shutdown()
+                server.server_close()
 
 
 class StoreTest(unittest.TestCase):

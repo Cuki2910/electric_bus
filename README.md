@@ -49,6 +49,10 @@ python -m crawlers.baseline_runner status
 python -m crawlers.baseline_runner export
 ```
 
+`run` and `resume` automatically start the monitor at http://127.0.0.1:8765.
+An existing monitor on that port is reused. The automatic monitor runs with the
+supervisor; `python -m crawlers.monitor` keeps it running independently.
+
 YouTube API data must be deleted/refreshed within 30 days of `crawled_at`.
 
 ## Data

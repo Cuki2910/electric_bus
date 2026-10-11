@@ -10,6 +10,7 @@ CLI:
     python -m crawlers.baseline_runner export
 """
 import argparse
+import errno
 import os
 import sys
 import threading
@@ -37,6 +38,22 @@ def _notify(kind, msg):
 
 def _batch_id(prefix):
     return f"{prefix}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M')}"
+
+
+def _start_monitor():
+    from crawlers.monitor import Handler, ThreadingHTTPServer
+
+    try:
+        server = ThreadingHTTPServer(("127.0.0.1", 8765), Handler)
+    except OSError as exc:
+        if exc.errno == errno.EADDRINUSE:
+            _notify("monitor", "Cổng 8765 đang được sử dụng; giữ dịch vụ hiện có.")
+        else:
+            _notify("monitor", f"Không khởi động được monitor: {exc}")
+        return
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    _notify("monitor", "http://127.0.0.1:8765")
+    return server
 
 
 def _worker_loop(platform, run_snapshot, run_worker, idle_wait, base_dir):
@@ -111,6 +128,7 @@ def run(hours, target, platform="all", resume=False):
     _STOP.clear()
     store.log_event("run_start", None, {"run_id": run_obj["run_id"], "deadline": run_obj["deadline_at"]})
     _notify("start", f"Bắt đầu run {run_obj['run_id']}; deadline {run_obj['deadline_at']}; target {target}.")
+    _start_monitor()
 
     workers = []
     if platform in ("all", "youtube"):
