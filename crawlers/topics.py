@@ -59,6 +59,13 @@ def gate_electric_bus_vietnam(title="", body=""):
     return verdict, reason
 
 
+def is_on_topic_threads(post_text, hashtags=None, source=None):
+    """Threads wrapper: post text + a plain space-joined hashtag blob.
+    ``source`` accepted for call-site compatibility, not consulted."""
+    hashtag_blob = " ".join((hashtags or []))
+    return gate_electric_bus_vietnam(post_text or "", hashtag_blob)
+
+
 def is_on_topic_tiktok(caption, hashtags, source=None):
     """TikTok wrapper: caption + a plain space-joined hashtag blob.
     ``source`` accepted for call-site compatibility, not consulted."""
