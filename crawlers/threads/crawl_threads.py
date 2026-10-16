@@ -444,7 +444,7 @@ def crawl_post(page, post_url, *, max_rounds, stale_rounds, batch_id_value, hand
     # Gate already ran at discovery time -- this is a defensive re-check
     # only, not a second gate.
     topic_verdict, topic_rule = gate(meta["post_text"], hashtags, source=source)
-    if topic_verdict != "accept":
+    if topic_verdict not in ("accept", "uncertain"):  # uncertain = a human kept it
         return [], f"topic_reject:{topic_rule}"
 
     pool_dict, stop_reason = build_pool(page, max_rounds, stale_rounds)

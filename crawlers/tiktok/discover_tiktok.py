@@ -183,8 +183,8 @@ def in_date_window(create_time, since_epoch, until_epoch):
 
 
 def keep_prefill(verdict):
-    """CSV `keep` column prefill: accept -> "1", reject -> "0"."""
-    return "1" if verdict == "accept" else "0"
+    """CSV `keep` column prefill: accept -> "1", reject -> "0", uncertain -> "" (human decides)."""
+    return {"accept": "1", "uncertain": ""}.get(verdict, "0")
 
 
 # --------------------------------------------------------------------------

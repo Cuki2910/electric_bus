@@ -48,7 +48,7 @@ BATCH_PREFIX = "news_electric_bus"
 CSV_FIELDS = ["article_url", "publisher", "discovery_query", "title", "published_at",
               "gate_verdict", "gate_rule", "in_date_window", "has_comments_confirmed", "keep"]
 
-_KEEP_FOR_VERDICT = {"accept": "1", "reject": "0"}
+_KEEP_FOR_VERDICT = {"accept": "1", "reject": "0", "uncertain": ""}
 
 
 def _parse_date_bound(value):
@@ -124,7 +124,7 @@ def main(argv=None):
     csv_path = os.path.join(args.output_dir, f"discovery_{batch}.csv")
 
     seen_this_run = set()
-    stats = {"discovered": 0, "accept": 0, "reject": 0, "no_widget": 0,
+    stats = {"discovered": 0, "accept": 0, "reject": 0, "uncertain": 0, "no_widget": 0,
               "outside_window": 0, "errored": 0}
 
     with open(csv_path, "w", encoding="utf-8", newline="") as csv_file:
@@ -182,7 +182,7 @@ def main(argv=None):
 
     print("\n=== Discovery summary ===")
     print(f"discovered: {stats['discovered']}")
-    print(f"accept / reject: {stats['accept']} / {stats['reject']}")
+    print(f"accept / reject / uncertain: {stats['accept']} / {stats['reject']} / {stats['uncertain']}")
     print(f"outside_window (published_at outside --since/--until, or unparseable): {stats['outside_window']}")
     print(f"no_widget (comment section absent on this article): {stats['no_widget']}")
     print(f"errored: {stats['errored']}")

@@ -605,7 +605,7 @@ def crawl_video(
     # Gate already ran at discovery time -- this is a defensive re-check
     # only, not a second gate (same convention as crawl_tiktok.py).
     topic_verdict, topic_rule = gate(meta["post_context"], meta["hashtags"], source=source)
-    if topic_verdict != "accept":
+    if topic_verdict not in ("accept", "uncertain"):  # uncertain = a human kept it
         return [], len(pool), f"topic_reject:{topic_rule}"
 
     selected = select_top_n(pool, top_n)
