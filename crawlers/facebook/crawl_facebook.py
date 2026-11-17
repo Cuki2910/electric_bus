@@ -5,6 +5,7 @@ crawler carry ``capture_scope == "target_permalink_article"`` plus provenance.
 """
 
 import argparse
+import base64
 import csv
 import hashlib
 import json
@@ -44,7 +45,7 @@ MAX_COMMENTS_PER_POST = 1000
 SCROLL_ROUNDS = 15
 POST_SCROLL_ROUNDS = 45
 DELAY_BETWEEN_SOURCES = 20
-NAV_TIMEOUT_MS = 90000
+NAV_TIMEOUT_MS = 30000
 CAPTURE_SCOPE = "target_permalink_article"
 REEL_CAPTURE_SCOPE = "target_reel_comments"
 VIDEO_CAPTURE_SCOPE = "target_video_comments"
@@ -76,21 +77,38 @@ _CAPTURE_POST_METADATA_JS = r"""
     let cleanTitle = (document.title || '')
         .replace(/^\(\d+\+?\)\s*/, '')
         .replace(/\s*\|\s*Facebook\s*$/, '')
-        .split(/\s+-\s+/)[0]
         .trim();
     if (/^facebook$/i.test(cleanTitle)) cleanTitle = '';
+    const identity = raw => {
+        const url = new URL(raw, location.origin);
+        if (url.hostname !== location.hostname) return '';
+        const path = url.pathname.replace(/\/+$/, '');
+        const match = path.match(/\/(?:posts|permalink|videos|reel)\/([^/]+)$/);
+        return match ? match[1] : url.searchParams.get('story_fbid') ||
+            url.searchParams.get('fbid') || url.searchParams.get('v') || path;
+    };
+    const targetId = identity(location.href);
+    const targetDialog = [...document.querySelectorAll('[role="dialog"]')]
+        .filter(dialog => dialog.getClientRects().length && [...dialog.querySelectorAll('a[href]')]
+            .some(link => {
+                const href = link.getAttribute('href') || '';
+                return href && !href.startsWith('#') && identity(link.href) === targetId;
+            }))
+        .sort((left, right) => left.innerText.length - right.innerText.length)[0];
+    const root = targetDialog || document;
     const norm = text => (text || '').toLocaleLowerCase().replace(/\s+/g, ' ').trim();
-    const titleWords = norm(cleanTitle).split(' ').filter(word => word.length >= 3);
+    const titleWords = [...new Set(norm(cleanTitle).split(' ').filter(word => word.length >= 3))];
     const score = text => {
         const value = norm(text);
         return titleWords.reduce((sum, word) => sum + (value.includes(word) ? 1 : 0), 0);
     };
     const isTopLevel = article => !article.parentElement || !article.parentElement.closest('div[role="article"]');
-    const articles = [...document.querySelectorAll('div[role="article"]')].filter(isTopLevel);
+    const articles = [...root.querySelectorAll('div[role="article"]')].filter(isTopLevel);
     let article = articles
         .filter(node => (node.innerText || '').trim().length >= 20)
         .sort((a, b) => score(b.innerText) - score(a.innerText))[0] || null;
-    const titleNodes = [...document.querySelectorAll('div[dir="auto"]')]
+    const titleNodes = [...root.querySelectorAll('div[dir="auto"]')]
+        .filter(node => !targetDialog || !node.closest('div[role="article"]'))
         .filter(node => (node.innerText || '').trim().length >= 8)
         .sort((a, b) => score(b.innerText) - score(a.innerText));
     const titleNode = titleNodes[0] || null;
@@ -103,7 +121,7 @@ _CAPTURE_POST_METADATA_JS = r"""
     // định danh hẹp nhất, an toàn hơn article đầu tiên hoặc toàn bộ role=main.
     if (titleNode && titleScore >= Math.max(2, articleScore)) {
         body = (titleNode.innerText || titleNode.textContent || '').trim();
-        scope = titleNode.closest('[role="main"]') || titleNode.parentElement;
+        scope = targetDialog || titleNode.closest('[role="main"]') || titleNode.parentElement;
     } else if (article && articleScore >= 2) {
         const bodyParts = [...article.querySelectorAll('div[dir="auto"]')]
             .filter(node => !node.closest('div[role="article"] div[role="article"]'))
@@ -112,13 +130,14 @@ _CAPTURE_POST_METADATA_JS = r"""
             .filter(text => text.length >= 3);
         body = [...new Set(bodyParts)].join('\n').trim();
     }
-    const structuredCreationTime = (document.documentElement.innerHTML.match(/"creation_time":(\d+)/) || [])[1] || '';
+    const structuredCreationTime = targetDialog ? '' :
+        (document.documentElement.innerHTML.match(/"creation_time":(\d+)/) || [])[1] || '';
     if (!body) {
         const publishedAtRaw = structuredCreationTime
             ? new Date(Number(structuredCreationTime) * 1000).toISOString()
             : '';
         document.documentElement.setAttribute('%s', JSON.stringify({
-            resolved: false, title: cleanTitle, body: '',
+            resolved: false, target_scoped: !!targetDialog, title: cleanTitle, body: '',
             published_at_candidates: publishedAtRaw ? [publishedAtRaw] : [],
             published_at_raw: publishedAtRaw,
         }));
@@ -129,22 +148,30 @@ _CAPTURE_POST_METADATA_JS = r"""
     const publishedAtCandidates = [];
     for (const node of timeCandidates) {
         const href = node.getAttribute('href') || '';
-        const looksLikePermalink = /\/posts\/|\/permalink\/|story_fbid=|\/videos\/|\/reel\/|\/watch\//.test(href);
+        const nodeArticle = node.closest('div[role="article"]');
+        if (targetDialog && ((nodeArticle && nodeArticle !== scope) ||
+            /comment_id=|reply_comment_id=/.test(href))) continue;
+        const looksLikePermalink = /\/posts\/|\/permalink\/|story_fbid=|\/videos\/|\/reel\/|\/watch\//.test(node.href || href);
         if (!node.matches('time,abbr,[role="tooltip"],[data-tooltip-content],[data-tooltip-text]') && !looksLikePermalink) continue;
+        if (targetDialog && node.matches('a[href]') && !href.startsWith('#') && identity(node.href) === targetId) {
+            node.setAttribute('data-scraped-post-time', '1');
+        }
+        const describedTime = (node.getAttribute('aria-describedby') || '').split(/\s+/)
+            .map(id => document.getElementById(id)?.textContent.trim() || '').find(Boolean) || '';
         const values = [
             node.getAttribute('datetime'), node.getAttribute('title'), node.getAttribute('aria-label'),
-            node.getAttribute('data-tooltip-content'), node.getAttribute('data-tooltip-text'), node.textContent,
+            node.getAttribute('data-tooltip-content'), node.getAttribute('data-tooltip-text'), describedTime, node.textContent,
         ].filter(Boolean).map(value => value.trim()).filter(Boolean);
         for (const value of values) {
             if (!publishedAtCandidates.includes(value)) publishedAtCandidates.push(value);
         }
     }
-    if (!publishedAtCandidates.length) {
+    if (!publishedAtCandidates.length && !targetDialog) {
         const structuredTime = (document.documentElement.innerHTML.match(/"(?:creation_time|created_time)":(\d+)/) || [])[1] || '';
         if (structuredTime) publishedAtCandidates.push(new Date(Number(structuredTime) * 1000).toISOString());
     }
     document.documentElement.setAttribute('%s', JSON.stringify({
-        resolved: true, title: cleanTitle, body,
+        resolved: true, target_scoped: !!targetDialog, title: cleanTitle, body,
         published_at_candidates: publishedAtCandidates.slice(0, 100),
         published_at_raw: publishedAtCandidates[0] || '',
     }));
@@ -167,25 +194,39 @@ _INIT_COMMENT_CAPTURE_JS = r"""
         return u.searchParams.get('story_fbid') || u.searchParams.get('fbid') || u.searchParams.get('v') || path;
     };
     const targetId = identity(targetUrl);
-    const commentContextIds = [...new Set([...document.querySelectorAll('a[href]')]
+    const targetDialog = [...document.querySelectorAll('[role="dialog"]')]
+        .filter(dialog => dialog.getClientRects().length && [...dialog.querySelectorAll('a[href]')]
+            .some(link => {
+                const href = link.getAttribute('href') || '';
+                return href && !href.startsWith('#') && !/comment_id=|reply_comment_id=/.test(link.href) &&
+                    new URL(link.href).hostname === location.hostname && identity(link.href) === targetId;
+            }))
+        .sort((left, right) => left.innerText.length - right.innerText.length)[0];
+    const root = targetDialog || document;
+    const commentContextIds = [...new Set([...root.querySelectorAll('a[href]')]
         .map(link => link.href || '')
+        .filter(href => new URL(href).hostname === location.hostname)
         .filter(href => /comment_id=|reply_comment_id=/.test(href) && /\/posts\/|story_fbid=|\/permalink\//.test(href))
         .map(identity))];
     const targetPath = new URL(targetUrl, location.origin).pathname.replace(/\/+$/, '');
     const isPhotoTarget = targetPath === '/photo';
     const locationMatches = identity(location.href) === targetId;
     const mappedIdentity = commentContextIds.length === 1 ? commentContextIds[0] : '';
-    const mappingValid = !!mappedIdentity && (isPhotoTarget || mappedIdentity === targetId);
-    const captureIdentity = mappingValid ? mappedIdentity : targetId;
-    const bodyText = (document.body ? document.body.innerText : '').toLocaleLowerCase().replace(/\s+/g, ' ').trim();
+    const bodyText = (targetDialog ? targetDialog.innerText : document.body ? document.body.innerText : '')
+        .toLocaleLowerCase().replace(/\s+/g, ' ').trim();
     const bodyProbe = expectedBody.slice(0, Math.min(expectedBody.length, 120));
     const bodyMatches = bodyProbe.length >= 20 && bodyText.includes(bodyProbe);
+    const mappingValid = !!mappedIdentity && (isPhotoTarget || mappedIdentity === targetId ||
+        (!!targetDialog && bodyMatches));
+    const captureIdentity = mappingValid ? mappedIdentity : targetId;
     const explicitEmpty = /chưa có bình luận nào|no comments yet/i.test(bodyText);
     const isTopLevel = article => !article.parentElement || !article.parentElement.closest('div[role="article"]');
-    const topLevel = [...document.querySelectorAll('div[role="article"]')].filter(isTopLevel);
+    const topLevel = [...root.querySelectorAll('div[role="article"]')].filter(isTopLevel);
     let matches = topLevel.filter(article => [...article.querySelectorAll('a[href]')].some(link => {
         const href = link.href || '';
-        return !/comment_id=|reply_comment_id=/.test(href) && identity(href) === targetId;
+        const rawHref = link.getAttribute('href') || '';
+        return rawHref && !rawHref.startsWith('#') &&
+            !/comment_id=|reply_comment_id=/.test(href) && identity(href) === targetId;
     }));
     // Permalink desktop thường render post body ngoài role=article; role=article chỉ
     // là comments. Flat mode chỉ hợp lệ khi URL hiện tại + metadata body khớp và
@@ -201,6 +242,7 @@ _INIT_COMMENT_CAPTURE_JS = r"""
     document.querySelectorAll('div[' + markAttr + ']').forEach(el => el.removeAttribute(markAttr));
     window.__scrapedComments = {};
     window.__scrapedCommentStats = {};
+    window.__commentScope = targetDialog || null;
     window.__targetUrl = targetUrl;
     window.__targetIdentity = captureIdentity;
     window.__flatTarget = matches.length === 0 && flatMapped;
@@ -248,7 +290,7 @@ _CAPTURE_COMMENTS_JS = r"""
         // Flat structure: require explicit comment permalink evidence. Suggested posts
         // without comment_id/reply_comment_id never enter capture.
         const isTopLevel = (a) => !a.parentElement || !a.parentElement.closest('div[role="article"]');
-        blocks = [...document.querySelectorAll('div[role="article"]')]
+        blocks = [...(window.__commentScope || document).querySelectorAll('div[role="article"]')]
             .filter(isTopLevel)
             .filter(block => [...block.querySelectorAll('a[href]')]
                 .some(link => /comment_id=|reply_comment_id=/.test(link.href || '')));
@@ -290,15 +332,19 @@ _CAPTURE_COMMENTS_JS = r"""
         };
         const permalinkLink = [...block.querySelectorAll('a[href]')]
             .filter(belongsToBlock)
-            .find(a => /comment_id=|reply_comment_id=/.test(a.href || '') &&
+            .find(a => new URL(a.href, location.origin).hostname === location.hostname &&
+                /comment_id=|reply_comment_id=/.test(a.href || '') &&
                 identity(a.href || '') === window.__targetIdentity);
         if (!permalinkLink) return;
         // aria-label thường mirror text hiển thị (tương đối, vd "5 tuần") — KHÔNG parse
         // được thành mốc tuyệt đối. Giá trị tuyệt đối nằm ở title/data-tooltip-*, giống
         // cách post metadata đã phải đọc (xem _CAPTURE_POST_METADATA_JS).
+        const describedTime = (permalinkLink.getAttribute('aria-describedby') || '').split(/\s+/)
+            .map(id => document.getElementById(id)?.textContent.trim() || '').find(Boolean) || '';
         const postedAtRaw = permalinkLink.getAttribute('title') ||
             permalinkLink.getAttribute('data-tooltip-content') ||
             permalinkLink.getAttribute('data-tooltip-text') ||
+            describedTime ||
             permalinkLink.getAttribute('aria-label') || '';
         if (!postedAtRaw.trim()) return;
         const permalinkUrl = new URL(permalinkLink.href, location.origin);
@@ -326,41 +372,29 @@ _CAPTURE_COMMENTS_JS = r"""
 """ % (_TARGET_RESOLVED_ATTR, _TARGET_MARK_ATTR)
 
 
-_STORE_COMMENTS_JS = """
-() => {
-    const scope = window.__commentScope || document.querySelector('div[%s="1"]') || document;
-    const values = [];
-    for (const match of (scope.innerText || '').matchAll(/(?:^|\\s)([\\d.,\\s]+)\\s*(?:b\\u00ecnh lu\\u1eadn|comments?)(?:\\s|$)/gi)) {
-        const value = Number(match[1].replace(/[^\\d]/g, ''));
-        if (Number.isSafeInteger(value)) values.push(value);
-    }
-    const text = scope.innerText || '';
-    window.__scrapedCommentStats = {
-        expected_total: values.length ? Math.max(...values) :
-            (/ch\\u01b0a c\\u00f3 b\\u00ecnh lu\\u1eadn n\\u00e0o|no comments yet/i.test(text) ? 0 : null),
-    };
-    document.documentElement.setAttribute('%s', JSON.stringify(Object.values(window.__scrapedComments || {})));
-    document.documentElement.setAttribute('%s', JSON.stringify(window.__scrapedCommentStats || {}));
-}
-""" % (_TARGET_MARK_ATTR, _COMMENT_DATA_ATTR, _COMMENT_STATS_ATTR)
-
 _CAPTURE_COMMENT_STATS_JS = r"""
 () => {
-    const scope = window.__commentScope ||
-        document.querySelector('div[%s="1"]') || document;
-    const text = scope.innerText || '';
+    const scope = window.__commentScope || document.querySelector('div[%s="1"]');
+    const text = scope ? (scope.innerText || '') : '';
     const values = [];
-    // The visible count is localized, but these labels cover the logged-in VN/EN UI.
-    for (const match of text.matchAll(/(?:^|\s)([\d.,\s]+)\s*(?:b\u00ecnh lu\u1eadn|comments?)(?:\s|$)/gi)) {
+    for (const match of text.matchAll(/(?:^|\s)([\d.,]+)\s*(?:b\u00ecnh lu\u1eadn|comments?)(?:\s|$)/gi)) {
         const value = Number(match[1].replace(/[^\d]/g, ''));
         if (Number.isSafeInteger(value)) values.push(value);
     }
     window.__scrapedCommentStats = {
         expected_total: values.length ? Math.max(...values) :
-            (/ch\u01b0a c\u00f3 b\u00ecnh lu\u1eadn n\u00e0o|no comments yet/i.test(text) ? 0 : null),
+            (/ch\u01b0a c\u00f3 b\u00ecnh lu\u1eadn n\u00e0o|no comments yet|h\u00e3y l\u00e0 ng\u01b0\u1eddi \u0111\u1ea7u ti\u00ean b\u00ecnh lu\u1eadn|be the first to comment/i.test(text) ? 0 : null),
     };
 }
 """ % _TARGET_MARK_ATTR
+
+_STORE_COMMENTS_JS = """
+() => {
+    (%s)();
+    document.documentElement.setAttribute('%s', JSON.stringify(Object.values(window.__scrapedComments || {})));
+    document.documentElement.setAttribute('%s', JSON.stringify(window.__scrapedCommentStats || {}));
+}
+""" % (_CAPTURE_COMMENT_STATS_JS, _COMMENT_DATA_ATTR, _COMMENT_STATS_ATTR)
 
 _INIT_REEL_COMMENT_CAPTURE_JS = r"""
 (args) => {
@@ -388,35 +422,55 @@ _INIT_REEL_COMMENT_CAPTURE_JS = r"""
     window.__commentScope = null;
     window.__targetUrl = targetUrl;
     window.__targetIdentity = identity(targetUrl);
+    window.__targetExpectedBody = args.expectedBody || '';
     document.documentElement.setAttribute(resolvedAttr,
         identity(location.href) === window.__targetIdentity ? '1' : '0');
 }
 """ % (_TARGET_MARK_ATTR, _TARGET_RESOLVED_ATTR)
 
-_LOCATE_REEL_COMMENT_SCOPE_JS = """
+_LOCATE_REEL_COMMENT_SCOPE_JS = r"""
 () => {
-    // Reel có 2 container cuộn độc lập: 1 pager chuyển giữa các Reel (KHÔNG chứa
-    // comment), 1 panel comment riêng. Phải xác định đúng panel comment để
-    // tránh cuộn nhầm sang Reel kế bên và gộp nhầm comment.
     if (window.__commentScope && document.contains(window.__commentScope)) return true;
-    const article = document.querySelector('div[role="article"]');
-    if (!article) return false;
-    let node = article;
-    while (node && node !== document.body) {
-        const style = window.getComputedStyle(node);
-        if ((style.overflowY === 'auto' || style.overflowY === 'scroll') && node.scrollHeight > node.clientHeight) {
-            window.__commentScope = node;
-            return true;
+    const identity = raw => {
+        const url = new URL(raw, location.origin);
+        const path = url.pathname.replace(/\/+$/, '');
+        const match = path.match(/\/(?:posts|permalink|videos|reel)\/([^/]+)$/);
+        return match ? match[1] : url.searchParams.get('story_fbid') ||
+            url.searchParams.get('fbid') || url.searchParams.get('v') || path;
+    };
+    if (identity(location.href) !== window.__targetIdentity) return false;
+    const normalize = text => (text || '').normalize('NFC').toLocaleLowerCase().replace(/\s+/g, ' ').trim();
+    const probe = normalize(window.__targetExpectedBody).slice(0, 100);
+    const bodyNodes = probe.length >= 20 ? [...document.querySelectorAll('[dir="auto"]')]
+        .filter(node => normalize(node.innerText).includes(probe))
+        .sort((left, right) => left.innerText.length - right.innerText.length) : [];
+    const links = [...document.querySelectorAll('a[href]')].filter(link =>
+        /comment_id=|reply_comment_id=/.test(link.href) && identity(link.href) === window.__targetIdentity);
+    const scopes = new Set();
+    for (const anchor of (bodyNodes.length ? bodyNodes : links)) {
+        let node = anchor.parentElement;
+        while (node && node !== document.body && node.getAttribute('role') !== 'main' && node.id !== 'watch_feed') {
+            if (node.querySelector('[role="textbox"]') &&
+                [...node.querySelectorAll('a[href]')].every(link =>
+                    !(/comment_id=|reply_comment_id=/.test(link.href) &&
+                        /\/posts\/|\/permalink\/|\/videos\/|\/reel\/|[?&](?:story_fbid|fbid|v)=/.test(link.href)) ||
+                    identity(link.href) === window.__targetIdentity)) {
+                scopes.add(node);
+                break;
+            }
+            node = node.parentElement;
         }
-        node = node.parentElement;
     }
-    return false;
+    if (scopes.size !== 1) return false;
+    window.__commentScope = [...scopes][0];
+    return true;
 }
 """
 
 _EXPAND_REEL_COMMENTS_JS = """
 () => {
-    const scope = window.__commentScope || document;
+    const scope = window.__commentScope;
+    if (!scope) return;
     const buttons = [...scope.querySelectorAll('[role="button"], button, span')];
     buttons.forEach(b => {
         const text = (b.getAttribute('aria-label') || b.textContent || '').toLowerCase().trim();
@@ -441,7 +495,8 @@ _CAPTURE_REEL_COMMENTS_JS = r"""
     const comments = window.__scrapedComments || {};
     // Chỉ đọc comment BÊN TRONG scope đã xác định, không đọc cả document để
     // tránh lẫn comment của Reel/video khác đang render sẵn bên cạnh.
-    const scope = window.__commentScope || document;
+    const scope = window.__commentScope;
+    if (!scope) return;
     const authorOf = block => {
         let label = block.getAttribute('aria-label') || '';
         if (!/Bình luận dưới tên|Comment by/i.test(label)) {
@@ -476,9 +531,12 @@ _CAPTURE_REEL_COMMENTS_JS = r"""
             .find(a => /comment_id=|reply_comment_id=/.test(a.href || '') &&
                 identity(a.href || '') === window.__targetIdentity);
         if (!permalinkLink) return;
+        const describedTime = (permalinkLink.getAttribute('aria-describedby') || '').split(/\s+/)
+            .map(id => document.getElementById(id)?.textContent.trim() || '').find(Boolean) || '';
         const postedAtRaw = permalinkLink.getAttribute('title') ||
             permalinkLink.getAttribute('data-tooltip-content') ||
             permalinkLink.getAttribute('data-tooltip-text') ||
+            describedTime ||
             permalinkLink.getAttribute('aria-label') || '';
         if (!postedAtRaw.trim()) return;
         const permalinkUrl = new URL(permalinkLink.href, location.origin);
@@ -620,20 +678,40 @@ _FEED_ITEM_LINKS_JS = """() => {
         .filter(links => links.length);
 }"""
 
-def _scroll_collect_links(rounds, collected):
-    """Like _scroll_page, but appends every feed item's hrefs to `collected` at each step."""
+def _scroll_collect_links(rounds, collected, deadline_check=None, on_posts=None):
+    """Collect virtualized posts until the feed stops yielding new identities."""
     def action(page):
-        collected.extend(page.evaluate(_FEED_ITEM_LINKS_JS))
-        for _ in range(rounds):
+        seen = set()
+        stale_rounds = 0
+        scrolls = 0
+        while True:
+            new_urls = []
+            for hrefs in page.evaluate(_FEED_ITEM_LINKS_JS):
+                post_url = _post_url_from_hrefs(hrefs)
+                if not post_url:
+                    continue
+                identity = canonical_post_identity(post_url)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                collected.append(hrefs)
+                new_urls.append(post_url)
+            if new_urls and on_posts:
+                on_posts(new_urls)
+            stale_rounds = 0 if new_urls else stale_rounds + 1
+            if stale_rounds >= 5 or (deadline_check and deadline_check()):
+                break
+            if rounds is not None and scrolls >= rounds:
+                break
             page.mouse.wheel(0, 3000)
             page.wait_for_timeout(1500)
-            collected.extend(page.evaluate(_FEED_ITEM_LINKS_JS))
+            scrolls += 1
         return page
 
     return action
 
 
-def _scroll_and_expand_page(post_url, rounds, max_comments=None, expected_body=""):
+def _scroll_and_expand_page(post_url, rounds, max_comments=None, expected_body="", deadline_check=None):
     def action(page):
         is_video_page = content_type_for_url(post_url) in ("reel", "video")
         init_script = _INIT_REEL_COMMENT_CAPTURE_JS if is_video_page else _INIT_COMMENT_CAPTURE_JS
@@ -644,17 +722,31 @@ def _scroll_and_expand_page(post_url, rounds, max_comments=None, expected_body="
             page.wait_for_timeout(4000)
         except Exception:
             pass
-        page.evaluate(init_script, {
+        capture_args = {
             "targetUrl": canonical_post_url(post_url),
             "expectedBody": expected_body,
-        })
+        }
+        page.evaluate(init_script, capture_args)
         if is_video_page:
             # Reel comments chỉ xuất hiện sau khi panel được mở.
             page.wait_for_timeout(4000)
+            page.evaluate(_LOCATE_REEL_COMMENT_SCOPE_JS)
+        else:
+            for attempt in range(4):
+                if page.evaluate("() => document.documentElement.getAttribute('%s') === '1'" % _TARGET_RESOLVED_ATTR):
+                    break
+                if attempt == 3 or (deadline_check and deadline_check()):
+                    return page
+                page.wait_for_timeout(1000)
+                page.evaluate(init_script, capture_args)
 
         stale_rounds = 0
         last_count = -1
-        for _ in range(rounds):
+        scrolls = 0
+        while rounds is None or scrolls < rounds:
+            if deadline_check and deadline_check():
+                break
+            scrolls += 1
             page.evaluate(capture_script)
             current_count = page.evaluate(
                 """() => Object.keys(window.__scrapedComments || {}).length"""
@@ -793,27 +885,21 @@ def _fetch(url, page_action=None, wait_selector=None):
 
     if StealthyFetcher is None:
         raise RuntimeError("Missing dependency: scrapling. Install project requirements before live crawling.")
-    for attempt in range(1, 4):
-        try:
-            kwargs = dict(
-                headless=True,
-                cookies=_fb_cookies(),
-                network_idle=False,
-                timeout=NAV_TIMEOUT_MS,
-                block_ads=True,
-                hide_canvas=True,
-                block_webrtc=True,
-                page_action=page_action,
-            )
-            if wait_selector:
-                kwargs["wait_selector"] = wait_selector
-                kwargs["wait_selector_state"] = "attached"
-            return StealthyFetcher.fetch(url, **kwargs)
-        except Exception as exc:
-            print(f"  [Attempt {attempt}/3] {type(exc).__name__}: {str(exc)[:120]}")
-            if attempt < 3:
-                time.sleep(10)
-    raise RuntimeError(f"Fetch failed after 3 attempts: {url}")
+    kwargs = dict(
+        headless=True,
+        cookies=_fb_cookies(),
+        network_idle=False,
+        timeout=NAV_TIMEOUT_MS,
+        retries=1,
+        block_ads=True,
+        hide_canvas=True,
+        block_webrtc=True,
+        page_action=page_action,
+    )
+    if wait_selector:
+        kwargs["wait_selector"] = wait_selector
+        kwargs["wait_selector_state"] = "attached"
+    return StealthyFetcher.fetch(url, **kwargs)
 
 
 def _post_url_from_hrefs(hrefs):
@@ -851,7 +937,7 @@ def _post_urls_from_href_groups(href_groups, max_posts):
             continue
         seen_ids.add(identity)
         post_urls.append(post_url)
-        if len(post_urls) >= max_posts:
+        if max_posts is not None and len(post_urls) >= max_posts:
             break
     return post_urls
 
@@ -879,54 +965,70 @@ def _resolve_permalink_via_photo(photo_href):
     return None
 
 
-def search_posts(query, max_posts):
-    url = f"{ROOT}/search/posts/?q={urllib.parse.quote(query)}"
+def _search_url(kind, query, year=None):
+    params = {"q": query}
+    if year is not None:
+        year = int(year)
+        if not 2021 <= year <= datetime.now(ZoneInfo("Asia/Ho_Chi_Minh")).year:
+            raise ValueError("Search year must be between 2021 and the current year")
+        args = json.dumps({
+            "start_year": str(year), "start_month": f"{year}-1", "start_day": f"{year}-1-1",
+            "end_year": str(year), "end_month": f"{year}-12", "end_day": f"{year}-12-31",
+        })
+        filters = {"rp_creation_time:0": json.dumps({"name": "creation_time", "args": args})}
+        params["filters"] = base64.b64encode(json.dumps(filters).encode("utf-8")).decode("ascii")
+    return f"{ROOT}/search/{kind}/?{urllib.parse.urlencode(params)}"
+
+def search_posts(query, max_posts=None, year=None, deadline_check=None, on_posts=None):
+    url = _search_url("posts", query, year)
     # wait_selector: chờ feed thật sự hiện ra trước khi scrape
     collected = []
-    resp = _fetch(url, page_action=_scroll_collect_links(SCROLL_ROUNDS, collected), wait_selector='div[role="feed"]')
+    rounds = None if max_posts is None else SCROLL_ROUNDS
+    resp = _fetch(url, page_action=_scroll_collect_links(rounds, collected, deadline_check, on_posts), wait_selector='div[role="feed"], div[role="article"]')
     items = resp.css(SELECTORS["feed_items"])
     if not items and not collected:
-        raise CookieExpiredError("No search posts found. Cookie may be expired.")
+        return []
     return _post_urls_from_items(items, max_posts, collected)
 
-def search_videos(query, max_posts):
-    url = f"{ROOT}/search/videos/?q={urllib.parse.quote(query)}"
+def search_videos(query, max_posts=None, year=None, deadline_check=None, on_posts=None):
+    url = _search_url("videos", query, year)
+    collected = []
+    rounds = None if max_posts is None else SCROLL_ROUNDS
     resp = _fetch(
         url,
-        page_action=_scroll_page(SCROLL_ROUNDS),
+        page_action=_scroll_collect_links(rounds, collected, deadline_check, on_posts),
         wait_selector='div[role="feed"], div[role="article"]',
     )
     items = resp.css(SELECTORS["feed_items"]) or resp.css('div[role="article"]')
-    if not items:
-        raise CookieExpiredError("No search videos found. Cookie may be expired.")
     # Giữ lại cả video (/videos/) lẫn reel (/reel/) — bỏ post thường
     return [
-        u for u in _post_urls_from_items(items, max_posts)
+        u for u in _post_urls_from_items(items, max_posts, collected)
         if content_type_for_url(u) in ("video", "reel")
         or re.search(r"/videos/|/reel/", u)
     ]
 
 
-def page_posts(url, max_posts):
+def page_posts(url, max_posts=None, deadline_check=None, on_posts=None):
     collected = []
+    rounds = None if max_posts is None else SCROLL_ROUNDS
     resp = _fetch(
         url,
-        page_action=_scroll_collect_links(SCROLL_ROUNDS, collected),
+        page_action=_scroll_collect_links(rounds, collected, deadline_check, on_posts),
         wait_selector='div[role="feed"], div[role="article"]',
     )
     items = resp.css(SELECTORS["feed_items"]) or resp.css('div[role="article"]')
     return _post_urls_from_items(items, max_posts, collected)
 
 
-def discover_posts(source):
+def discover_posts(source, deadline_check=None, on_posts=None):
     if source["kind"] == "direct_post":
         return [canonical_post_url(source["url"])]
     if source["kind"] == "search":
-        return search_posts(source["query"], source["max_posts"])
+        return search_posts(source["query"], source.get("max_posts"), source.get("year"), deadline_check, on_posts)
     if source["kind"] == "public_page":
-        return page_posts(source["url"], source["max_posts"])
+        return page_posts(source["url"], source.get("max_posts"), deadline_check, on_posts)
     if source["kind"] == "video_search":
-        return search_videos(source["query"], source["max_posts"])
+        return search_videos(source["query"], source.get("max_posts"), source.get("year"), deadline_check, on_posts)
     raise ValueError(f"Unsupported source kind: {source['kind']}")
 
 
@@ -941,6 +1043,33 @@ def _capture_post_metadata_page(page):
         pass
     page.wait_for_timeout(2500)
     page.evaluate(_CAPTURE_POST_METADATA_JS)
+    captured = page.evaluate("attribute => JSON.parse(document.documentElement.getAttribute(attribute) || '{}')", _METADATA_DATA_ATTR)
+    if captured.get("target_scoped") and not any(
+        _parse_absolute_post_time(value) for value in captured.get("published_at_candidates", [])
+    ):
+        for link in page.locator('a[data-scraped-post-time="1"]').all():
+            try:
+                if not link.is_visible():
+                    continue
+                link.hover(timeout=3000)
+                page.wait_for_timeout(1500)
+                page.evaluate(_CAPTURE_POST_METADATA_JS)
+                captured = page.evaluate("attribute => JSON.parse(document.documentElement.getAttribute(attribute) || '{}')", _METADATA_DATA_ATTR)
+                if any(_parse_absolute_post_time(value) for value in captured.get("published_at_candidates", [])):
+                    break
+            except Exception:
+                continue
+    if urllib.parse.urlparse(page.url).path.rstrip("/") == "/photo":
+        page.evaluate(r"""() => {
+            const links = [...document.querySelectorAll('a[href]')].filter(link =>
+                /xem bài viết|view post/i.test((link.getAttribute('aria-label') || '') + ' ' +
+                    (link.getAttribute('title') || '') + ' ' + (link.innerText || '')));
+            const urls = [...new Set(links.map(link => link.href))];
+            if (urls.length !== 1) return;
+            const data = JSON.parse(document.documentElement.getAttribute('%s') || '{}');
+            data.parent_post_url = urls[0];
+            document.documentElement.setAttribute('%s', JSON.stringify(data));
+        }""" % (_METADATA_DATA_ATTR, _METADATA_DATA_ATTR))
     return page
 
 
@@ -1046,7 +1175,11 @@ def _metadata_from_response(resp, post_url):
         captured = json.loads(raw)
     except json.JSONDecodeError:
         captured = {}
-    creation_story = extract_creation_story_message_text(resp.html_content)
+    path = urllib.parse.urlparse(post_url).path.rstrip('/')
+    use_creation_story = not captured.get("target_scoped") and (
+        content_type_for_url(post_url) in ("video", "reel") or path == "/photo"
+    )
+    creation_story = extract_creation_story_message_text(resp.html_content) if use_creation_story else ""
     title = captured.get("title", "").strip()
     body = creation_story or captured.get("body", "")
     published_candidates = captured.get("published_at_candidates", [])
@@ -1057,7 +1190,7 @@ def _metadata_from_response(resp, post_url):
         published_candidates.insert(0, captured["published_at_raw"])
     published_raw = next((value for value in published_candidates if _parse_absolute_post_time(value)), "")
     published_raw = published_raw or next(iter(published_candidates), "")
-    return {
+    metadata = {
         "post_title": title[:500],
         "post_context": body.strip()[:10000],
         "post_published_at_raw": published_raw,
@@ -1065,6 +1198,14 @@ def _metadata_from_response(resp, post_url):
         "metadata_resolved": bool(body.strip() and (creation_story or captured.get("resolved"))),
         **extract_owner(resp.html_content, post_url),
     }
+    if urllib.parse.urlparse(post_url).path.rstrip("/") == "/photo":
+        parent = urllib.parse.urlparse(urllib.parse.urljoin(ROOT, captured.get("parent_post_url") or ""))
+        if (parent.scheme in ("http", "https") and parent.hostname in ("facebook.com", "www.facebook.com", "web.facebook.com", "m.facebook.com")
+                and re.search(r"/posts/[^/]+/?$|/permalink/[^/]+/?$|^/(?:story|permalink)\.php$", parent.path)
+                and not re.search(r"(?:^|&)(?:reply_)?comment_id=", parent.query)
+                and canonical_post_identity(parent.geturl()) not in ("/story.php", "/permalink.php")):
+            metadata["parent_post_url"] = canonical_post_url(parent.geturl())
+    return metadata
 
 
 def fetch_post_metadata(post_url):
@@ -1081,9 +1222,14 @@ def gate_metadata(metadata, source=None):
     return gate_electric_bus_vietnam(metadata.get("post_title", ""), metadata.get("post_context", ""))
 
 
-def fetch_eligible_post(post_url, max_comments=MAX_COMMENTS_PER_POST, source=None):
+def fetch_eligible_post(post_url, max_comments=MAX_COMMENTS_PER_POST, source=None, deadline_check=None):
     """Metadata → gate → comments; reject tuyệt đối không gọi comment fetch."""
     metadata = fetch_post_metadata(post_url)
+    parent_url = metadata.pop("parent_post_url", None)
+    if parent_url:
+        post_url = parent_url
+        metadata = fetch_post_metadata(post_url)
+        metadata["resolved_post_url"] = post_url
     if not metadata.get("post_published_at"):
         return metadata, "reject", "date_unresolved", "", []
     if not post_in_window(metadata["post_published_at"]):
@@ -1091,16 +1237,17 @@ def fetch_eligible_post(post_url, max_comments=MAX_COMMENTS_PER_POST, source=Non
     verdict, reason = gate_metadata(metadata, source)
     if verdict != "accept":
         return metadata, verdict, reason, "", []
-    post_context, comments = fetch_post(post_url, max_comments=max_comments, metadata=metadata)
+    post_context, comments = fetch_post(post_url, max_comments=max_comments, metadata=metadata, deadline_check=deadline_check)
     return metadata, verdict, reason, post_context, comments
 
 
-def fetch_post(post_url, max_comments=MAX_COMMENTS_PER_POST, metadata=None):
+def fetch_post(post_url, max_comments=MAX_COMMENTS_PER_POST, metadata=None, deadline_check=None):
     # wait_selector được xử lý bên trong page_action để đảm bảo chạy TRƯỚC _INIT_COMMENT_CAPTURE_JS
     resp = _fetch(
         post_url,
         page_action=_scroll_and_expand_page(
-            post_url, POST_SCROLL_ROUNDS, max_comments, (metadata or {}).get("post_context", "")
+            post_url, None if max_comments is None else POST_SCROLL_ROUNDS, max_comments,
+            (metadata or {}).get("post_context", ""), deadline_check
         ),
     )
     metadata = metadata or {}
@@ -1129,14 +1276,15 @@ def fetch_post(post_url, max_comments=MAX_COMMENTS_PER_POST, metadata=None):
             continue
         comment["posted_at"] = posted_at
         valid_comments.append(comment)
+    valid_count = len(valid_comments)
     if max_comments is not None:
         valid_comments = valid_comments[:max_comments]
     expected_total = capture_stats.get("expected_total")
     metadata["comment_capture"] = {
         "expected_total": expected_total if isinstance(expected_total, int) and expected_total >= 0 else None,
         "rendered_count": len(comments),
-        "valid_count": len(valid_comments),
-        "invalid_timestamp_count": len(comments) - len(valid_comments),
+        "valid_count": valid_count,
+        "invalid_timestamp_count": len(comments) - valid_count,
         "limited_by_max_comments": max_comments is not None and len(comments) >= max_comments,
     }
     return post_context, valid_comments
@@ -1262,6 +1410,7 @@ def main(argv=None):
                 seen_posts.add(identity)
                 try:
                     metadata, verdict, topic_rule, post_context, comments = fetch_eligible_post(post_url, source=source)
+                    post_url = metadata.pop("resolved_post_url", post_url)
                     audit = {
                         "source_url": canonical_post_url(post_url), **metadata,
                         "verdict": verdict, "reason": topic_rule,
@@ -1281,6 +1430,7 @@ def main(argv=None):
                     time.sleep(5)
                     try:
                         metadata, verdict, topic_rule, post_context, comments = fetch_eligible_post(post_url, source=source)
+                        post_url = metadata.pop("resolved_post_url", post_url)
                         if verdict != "accept":
                             continue
                     except Exception as retry_exc:

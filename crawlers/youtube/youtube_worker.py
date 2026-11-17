@@ -1,47 +1,48 @@
 """YouTube worker cho baseline_gate_v2.
 
-Discovery = (keyword x cửa sổ năm). Gate title+description. Video accept lấy
+Discovery = (keyword x monthly window). Gate title+description. Video accept lấy
 top-level comment + toàn bộ reply. Checkpoint cursor/quota vào SQLite để resume.
 
 Retention: dữ liệu comment API phải xóa/refresh trong 30 ngày kể từ crawled_at.
 """
 import os
 import sys
-import time
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from crawlers.youtube import crawl_youtube as yt
-from crawlers.electric_bus.config import post_in_window, youtube_search_specs
-from crawlers.topics import co_thanh_pho_khac, gate_electric_bus_vietnam, matched_groups
+from crawlers.electric_bus.config import HCM_TZ, SOURCES_VERSION, post_in_window, youtube_search_specs
+from crawlers.topics import GATE_VERSION, co_thanh_pho_khac, gate_electric_bus_vietnam, matched_groups
 
-# Cửa sổ năm cố định thay vì bisection thích nghi: dedup video ID xử lý trùng lặp,
-# và search order=date trong mỗi năm đã đủ phủ. Đơn giản, ít quota lãng phí hơn.
-# ponytail: cửa sổ năm cứng; nâng lên bisection nếu 1 năm bão hòa >nhiều trang.
-YEAR_START = 2005  # YouTube public launch; không đặt giới hạn lịch sử nghiệp vụ.
-
-
-def _search_specs():
-    return list(youtube_search_specs())
+def _search_specs(now=None):
+    return list(youtube_search_specs(now))
 
 
 def seed_queue(store):
-    """Nạp (keyword x window) vào discovery_queue nếu chưa seed."""
-    if not store.kv_get("youtube_seeded"):
+    """Seed monthly history independently of legacy campaign flags."""
+    store.conn.execute(
+        "UPDATE discovery_queue SET status='skipped', lease_at=0 "
+        "WHERE platform='youtube' AND status='pending' AND source='refresh_comments'"
+    )
+    key = f"youtube_seeded:{SOURCES_VERSION}"
+    if not store.kv_get(key):
         for payload in _search_specs():
-            store.enqueue("youtube", "search", payload, priority=100)
-        store.kv_set("youtube_seeded", True)
-    if not store.kv_get("youtube_june_2026_backfill_seeded"):
-        # ponytail: mỗi tháng một trang/keyword; tăng max_pages nếu tháng bão hòa 50 kết quả.
-        for month, after, before in (
-            (6, "2026-05-31T17:00:00Z", "2026-06-30T17:00:00Z"),
-            (7, "2026-06-30T17:00:00Z", "2026-07-31T17:00:00Z"),
-        ):
-            for spec in _search_specs():
-                store.enqueue("youtube", "search", {**spec, "after": after, "before": before},
-                              priority=10, dedup_key=f"youtube:window_backfill:{month}:{spec['keyword']}")
-        store.kv_set("youtube_june_2026_backfill_seeded", True)
+            store.enqueue("youtube", "search", payload, priority=100,
+                          dedup_key=f"youtube:{SOURCES_VERSION}:{payload['keyword']}:{payload['after']}")
+        store.kv_set(key, True)
+    gate_key = f"youtube_gate_rechecked:{GATE_VERSION}"
+    if not store.kv_get(gate_key):
+        accepted = 0
+        for row in store.conn.execute("SELECT * FROM contexts WHERE platform='youtube' AND verdict='reject'"):
+            context = dict(row)
+            verdict, reason = gate_electric_bus_vietnam(context.get("post_title"), context.get("post_context"))
+            if verdict == "accept" and post_in_window(context.get("post_published_at")):
+                context.update(verdict=verdict, reason=reason, state="accepted", comment_retry_count=0)
+                store.upsert_context(context)
+                accepted += 1
+        store.kv_set(gate_key, True)
+        store.log_event("youtube_gate_recheck_seeded", "youtube", {"gate_version": GATE_VERSION, "accepted": accepted})
 
 
 def _revisit_current_year(store):
@@ -52,12 +53,16 @@ def _revisit_current_year(store):
     quota search.list khi hàng đợi rỗng được kiểm tra lại mỗi vài phút.
     """
     now = datetime.now(timezone.utc)
+    month_start = now.astimezone(HCM_TZ).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    after = month_start.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
     # Hourly revisit of all keywords burned ~2700 quota units/hour (27 searches x 100) for
     # ~0-1 new accepted videos per hour (measured from contexts), exhausting the daily
     # quota in under 4 hours. Bucket by REVISIT_HOURS and use only distinct queries.
     stamp = f"{now:%Y%m%d}{now.hour // REVISIT_HOURS:02d}"
-    for payload in _search_specs():
+    for payload in _search_specs(now):
         if payload["keyword"] not in REVISIT_KEYWORDS:
+            continue
+        if payload["after"] != after:
             continue
         store.enqueue("youtube", "search", payload, priority=50,
                       dedup_key=f"youtube:revisit:{payload['topic']}:{payload['keyword']}:{stamp}")
@@ -68,62 +73,6 @@ REVISIT_HOURS = 6
 REVISIT_KEYWORDS = frozenset({
     "xe buýt điện", "xe bus điện", "bus điện", "electric bus", "VinBus", "xe điện công cộng",
 })
-
-_MAX_REFRESH_RETRIES = 3  # deficit không giảm sau ngần này lần (comment API đếm nhưng không lấy được) -> ngừng re-queue.
-
-
-def seed_deficit_refresh(store):
-    """Rank accepted videos by API commentCount - stored_count, enqueue largest first."""
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H")
-    if store.kv_get("youtube_deficit_ranked_hour") == stamp:
-        return 0
-    rows = store.conn.execute(
-        """SELECT x.context_id, COUNT(c.comment_id) stored_count
-           FROM contexts x LEFT JOIN comments c
-             ON c.platform=x.platform AND c.context_id=x.context_id
-           WHERE x.platform='youtube' AND x.verdict='accept'
-             AND x.state NOT IN ('comments_disabled','video_not_found')
-             AND COALESCE(x.comment_retry_count,0) < ?
-           GROUP BY x.context_id""",
-        (_MAX_REFRESH_RETRIES,),
-    ).fetchall()
-    stored = {row["context_id"]: row["stored_count"] for row in rows}
-    ids = list(stored)
-    counts = {}
-    for offset in range(0, len(ids), 50):
-        counts.update(yt.fetch_video_comment_counts(ids[offset:offset + 50]))
-        if offset + 50 < len(ids):
-            time.sleep(1)
-    queued = 0
-    for video_id, api_count in counts.items():
-        deficit = max(0, api_count - stored[video_id])
-        if deficit <= 0:
-            continue
-        payload = {"video_id": video_id, "comment_count": api_count, "stored_count": stored[video_id], "deficit": deficit}
-        if store.enqueue("youtube", "refresh_comments", payload, priority=-deficit,
-                         dedup_key=f"youtube:refresh:{video_id}:{api_count}:{stamp}"):
-            queued += 1
-    store.kv_set("youtube_deficit_ranked_hour", stamp)
-    store.log_event("youtube_deficit_ranked", "youtube", {"videos": len(ids), "queued": queued})
-    return queued
-
-
-def _video_from_context(store, video_id):
-    row = store.conn.execute(
-        "SELECT context_id,post_title,post_context,post_published_at FROM contexts WHERE platform='youtube' AND context_id=?",
-        (video_id,),
-    ).fetchone()
-    if not row:
-        return None
-    title = row["post_title"] or ""
-    context = row["post_context"] or ""
-    prefix = f"{title}\n"
-    return {
-        "video_id": row["context_id"], "title": title,
-        "description": context[len(prefix):] if context.startswith(prefix) else context,
-        "published_at": row["post_published_at"] or "",
-    }
-
 
 def _record(video, snippet, comment_id, comment_type, parent_id, thread_id, depth, run_id, batch_id):
     title = video.get("title", "")
@@ -157,15 +106,19 @@ def _record(video, snippet, comment_id, comment_type, parent_id, thread_id, dept
     }
 
 
-def _crawl_video(store, video, run_id, batch_id):
+def _crawl_video(store, video, run_id, batch_id, deadline_check=None):
     """Top-level + toàn bộ replies. Trả về số comment mới thêm vào store."""
     added = 0
     for thread in yt.fetch_comments(video["video_id"]):
+        if deadline_check and deadline_check():
+            raise InterruptedError("Crawl deadline reached")
         top = thread["snippet"]["topLevelComment"]
         top_id = top["id"]
         batch = [_record(video, top["snippet"], top_id, "top_level", None, top_id, 0, run_id, batch_id)]
         if thread["snippet"].get("totalReplyCount", 0):
             for reply in yt.fetch_replies(top_id):
+                if deadline_check and deadline_check():
+                    raise InterruptedError("Crawl deadline reached")
                 batch.append(_record(video, reply["snippet"], reply["id"], "reply", top_id, top_id, 1, run_id, batch_id))
         added += store.add_comments(batch)
     return added
@@ -201,7 +154,7 @@ def _drain_accepted_contexts(store, run, deadline_check, batch_id, processed_vid
             "published_at": row["post_published_at"] or "",
         }
         try:
-            _crawl_video(store, video, run["run_id"], batch_id)
+            _crawl_video(store, video, run["run_id"], batch_id, deadline_check)
         except yt.YouTubeAPIError as e:
             if e.reason == "quotaExceeded":
                 store.kv_set("youtube_status", "quota_wait")
@@ -220,6 +173,8 @@ def _drain_accepted_contexts(store, run, deadline_check, batch_id, processed_vid
                 continue
             store.log_event("yt_comment_error", "youtube", {"video": video["video_id"], "reason": e.reason})
             return {"status": "retry_wait", "retry_seconds": 60}
+        except InterruptedError:
+            return {"status": "deadline"}
         except OSError as exc:
             store.log_event("yt_comment_error", "youtube", {"video": video["video_id"], "reason": repr(exc)[:200]})
             return {"status": "retry_wait", "retry_seconds": 60}
@@ -243,20 +198,6 @@ def run_once(store, run, deadline_check, batch_id):
     backlog_result = _drain_accepted_contexts(store, run, deadline_check, batch_id, processed_videos)
     if backlog_result:
         return backlog_result
-    try:
-        seed_deficit_refresh(store)
-    except yt.YouTubeAPIError as e:
-        if e.reason == "quotaExceeded":
-            store.kv_set("youtube_status", "quota_wait")
-            return {"status": "quota_wait"}
-        if e.reason == "rateLimitExceeded":
-            return _rate_limit_wait(store)
-        store.log_event("yt_rank_error", "youtube", {"reason": e.reason})
-        return {"status": "retry_wait", "retry_seconds": 60}
-    except OSError as exc:
-        store.log_event("yt_rank_error", "youtube", {"reason": repr(exc)[:200]})
-        return {"status": "retry_wait", "retry_seconds": 60}
-
     while True:
         if deadline_check():
             store.kv_set("youtube_status", "deadline")
@@ -273,56 +214,14 @@ def run_once(store, run, deadline_check, batch_id):
 
         payload = task["payload"]
         if task["source"] == "refresh_comments":
-            video = _video_from_context(store, payload["video_id"])
-            if video is None:
-                store.complete_task(task["id"], "failed")
-                continue
-            before = store.conn.execute(
-                "SELECT COUNT(*) n FROM comments WHERE platform='youtube' AND context_id=?",
-                (video["video_id"],),
-            ).fetchone()["n"]
-            try:
-                _crawl_video(store, video, run["run_id"], batch_id)
-            except yt.YouTubeAPIError as e:
-                if e.reason == "quotaExceeded":
-                    store.defer_task(task["id"], delay=0)
-                    store.kv_set("youtube_status", "quota_wait")
-                    return {"status": "quota_wait"}
-                if e.reason == "rateLimitExceeded":
-                    return _rate_limit_wait(store, task["id"])
-                terminal = {"commentsDisabled": "comments_disabled", "videoNotFound": "video_not_found"}
-                if e.reason in terminal:
-                    store.set_context_state("youtube", video["video_id"], terminal[e.reason])
-                    store.complete_task(task["id"])
-                    continue
-                store.defer_task(task["id"], delay=120)
-                store.log_event("yt_refresh_error", "youtube", {"video": video["video_id"], "reason": e.reason})
-                return {"status": "retry_wait", "retry_seconds": 120}
-            except OSError as exc:
-                store.defer_task(task["id"], delay=60)
-                store.log_event("yt_refresh_error", "youtube", {"video": video["video_id"], "reason": repr(exc)[:200]})
-                return {"status": "retry_wait", "retry_seconds": 60}
-            after = store.conn.execute(
-                "SELECT COUNT(*) n FROM comments WHERE platform='youtube' AND context_id=?",
-                (video["video_id"],),
-            ).fetchone()["n"]
-            added = after - before
-            store.complete_task(task["id"])
-            store.kv_set("youtube_rate_limit_failures", 0)
-            if added > 0:
-                store.reset_comment_retry_count("youtube", video["video_id"])
-                store.set_context_state("youtube", video["video_id"], "comments_done")
-                retry_count = 0
-            else:
-                retry_count = store.bump_comment_retry_count("youtube", video["video_id"])
-            store.log_event("youtube_refresh_done", "youtube", {
-                "video": video["video_id"], "deficit": payload["deficit"], "added": added,
-                "retry_count": retry_count,
-            })
+            store.complete_task(task["id"], "skipped")
             continue
 
         try:
-            videos = yt.search_videos(payload["keyword"], payload["after"], payload["before"], max_pages=1, max_calls=None)
+            videos, next_page = yt.search_video_page(
+                payload["keyword"], payload["after"], payload["before"],
+                page_token=payload.get("page_token"),
+            )
         except yt.YouTubeAPIError as e:
             if e.reason == "quotaExceeded":
                 store.defer_task(task["id"], delay=0)  # trả lại queue, chưa xử lý.
@@ -331,6 +230,10 @@ def run_once(store, run, deadline_check, batch_id):
                 return {"status": "quota_wait"}
             if e.reason == "rateLimitExceeded":
                 return _rate_limit_wait(store, task["id"])
+            if e.reason == "invalidPageToken" and payload.get("page_token"):
+                payload = {key: value for key, value in payload.items() if key != "page_token"}
+                payload["page_restart"] = payload.get("page_restart", 0) + 1
+                store.checkpoint_task(task["id"], payload)
             store.retry_task(task["id"], delay=120)
             continue
         except OSError:
@@ -349,8 +252,20 @@ def run_once(store, run, deadline_check, batch_id):
                     store.defer_task(task["id"], delay=0)
                     store.kv_set("youtube_status", "quota_wait")
                     return {"status": "quota_wait"}
+                if e.reason == "rateLimitExceeded":
+                    store.kv_set("youtube_processed_videos", list(processed_videos))
+                    return _rate_limit_wait(store, task["id"])
                 store.log_event("yt_desc_error", "youtube", {"reason": e.reason})
+                store.retry_task(task["id"], delay=120)
+                return {"status": "retry_wait", "retry_seconds": 120}
+            except OSError:
+                store.retry_task(task["id"], delay=60)
+                return {"status": "retry_wait", "retry_seconds": 60}
         for video in videos:
+            if deadline_check():
+                store.kv_set("youtube_processed_videos", list(processed_videos))
+                store.defer_task(task["id"], delay=0)
+                return {"status": "deadline"}
             if not post_in_window(video.get("published_at")):
                 continue
             vid = video["video_id"]
@@ -375,7 +290,7 @@ def run_once(store, run, deadline_check, batch_id):
                 processed_videos.add(vid)
                 continue
             try:
-                _crawl_video(store, video, run["run_id"], batch_id)
+                _crawl_video(store, video, run["run_id"], batch_id, deadline_check)
                 store.set_context_state("youtube", vid, "comments_done")
                 processed_videos.add(vid)
             except yt.YouTubeAPIError as e:
@@ -384,10 +299,33 @@ def run_once(store, run, deadline_check, batch_id):
                     store.defer_task(task["id"], delay=0)
                     store.kv_set("youtube_status", "quota_wait")
                     return {"status": "quota_wait"}
+                if e.reason == "rateLimitExceeded":
+                    store.kv_set("youtube_processed_videos", list(processed_videos))
+                    return _rate_limit_wait(store, task["id"])
                 if e.reason not in ("commentsDisabled", "videoNotFound", "commentNotFound"):
                     store.log_event("yt_comment_error", "youtube", {"video": vid, "reason": e.reason})
+                    store.kv_set("youtube_processed_videos", list(processed_videos))
+                    store.retry_task(task["id"], delay=120)
+                    return {"status": "retry_wait", "retry_seconds": 120}
+                store.set_context_state("youtube", vid, {
+                    "commentsDisabled": "comments_disabled", "videoNotFound": "video_not_found",
+                    "commentNotFound": "comment_not_found",
+                }[e.reason])
+                processed_videos.add(vid)
+            except InterruptedError:
+                store.kv_set("youtube_processed_videos", list(processed_videos))
+                store.defer_task(task["id"], delay=0)
+                return {"status": "deadline"}
             except OSError:
-                time.sleep(5)
+                store.kv_set("youtube_processed_videos", list(processed_videos))
+                store.retry_task(task["id"], delay=60)
+                return {"status": "retry_wait", "retry_seconds": 60}
 
+        if next_page:
+            if next_page == payload.get("page_token"):
+                store.retry_task(task["id"], delay=120)
+                continue
+            store.enqueue("youtube", "search", {**payload, "page_token": next_page},
+                          priority=task["priority"])
         store.complete_task(task["id"])
         store.kv_set("youtube_processed_videos", list(processed_videos))

@@ -23,6 +23,36 @@ COMMENT_TIME_ISO = "2026-07-11T17:43:00+07:00"
 
 
 class MonitorTest(unittest.TestCase):
+    def test_year_counts_include_empty_years_and_unknown_dates(self):
+        from crawlers.monitor import snapshot
+
+        with tempfile.TemporaryDirectory(prefix="monitor_") as directory:
+            database = os.path.join(directory, "crawl.db")
+            with sqlite3.connect(database) as connection:
+                connection.executescript(_SCHEMA)
+                connection.executemany(
+                    "INSERT INTO comments(platform,comment_id,context_id,comment_text,comment_type,"
+                    "post_published_at,crawled_at) VALUES (?,?,'post','test',?,?,?)",
+                    [
+                        ("youtube", "first", "top_level", "2021-01-01T12:00:00+07:00", COMMENT_TIME_ISO),
+                        ("youtube", "boundary", "reply", "2020-12-31T18:00:00Z", COMMENT_TIME_ISO),
+                        ("facebook", "older", "reply", "2024-03-01T12:00:00+07:00", COMMENT_TIME_ISO),
+                        ("youtube", "recent", "top_level", "2026-01-01T12:00:00+07:00", COMMENT_TIME_ISO),
+                        ("facebook", "unknown", "top_level", "invalid", COMMENT_TIME_ISO),
+                        ("youtube", "not_crawled", "top_level", "2021-01-01T12:00:00+07:00", None),
+                    ],
+                )
+            with patch("crawlers.monitor.DB", database):
+                report = snapshot("all")
+                self.assertEqual(report["year_counts"], snapshot("1h")["year_counts"])
+            counts = {row["year"]: row for row in report["year_counts"]}
+            self.assertEqual(counts[2021], {"year": 2021, "facebook": 0, "youtube": 2})
+            self.assertEqual(counts[2022], {"year": 2022, "facebook": 0, "youtube": 0})
+            self.assertEqual(counts[2024]["facebook"], 1)
+            self.assertEqual(counts[None]["facebook"], 1)
+            self.assertEqual(report["year_counts"][-1]["year"], None)
+            self.assertEqual(sum(row["facebook"] + row["youtube"] for row in counts.values()), report["total"])
+
     def test_monitor_serves_dashboard_and_reuses_busy_port(self):
         from http.server import ThreadingHTTPServer
         from crawlers.baseline_runner import _start_monitor
@@ -63,6 +93,45 @@ class StoreTest(unittest.TestCase):
         r2 = self.store.get_or_create_run(24, 5000)
         self.assertEqual(r1["deadline_at"], r2["deadline_at"])
         self.assertEqual(r1["run_id"], r2["run_id"])
+
+    def test_year_coverage_and_report_include_empty_years_and_queue_status(self):
+        from crawlers.baseline_runner import _write_final_report
+
+        run = self.store.get_or_create_run(24, 5000)
+        published = "2020-12-31T17:00:00Z"
+        for platform in ("facebook", "youtube"):
+            self._accept_context(platform, "first")
+            self.store.conn.execute(
+                "UPDATE contexts SET post_published_at=? WHERE platform=?", (published, platform)
+            )
+        self.store.add_comments([
+            {"platform": "youtube", "context_id": "first", "comment_id": "top", "comment_text": "Good",
+             "comment_type": "top_level", "post_published_at": published},
+            {"platform": "youtube", "context_id": "first", "comment_id": "reply", "comment_text": "Agree",
+             "comment_type": "reply", "post_published_at": published},
+            {"platform": "facebook", "context_id": "first", "comment_id": "fb", "comment_text": "Good",
+             "comment_type": "top_level", "post_published_at": published,
+             "posted_at_raw": COMMENT_TIME, "posted_at": COMMENT_TIME_ISO},
+        ])
+        self.store.conn.execute(
+            "INSERT INTO comments(platform,comment_id,context_id,post_published_at,comment_type,comment_text) "
+            "VALUES ('facebook','invalid','first',?,'top_level','Bad timestamp')", (published,)
+        )
+        self.store.enqueue("youtube", "search", {"q": "test"})
+        task = self.store.claim("youtube")
+        self.store.complete_task(task["id"], "failed")
+        progress = self.store.write_progress(run)
+        coverage = {(row["year"], row["platform"]): row for row in progress["coverage_by_year"]}
+        self.assertEqual(coverage[(2021, "youtube")]["comments"], 2)
+        self.assertEqual(coverage[(2021, "facebook")]["comments"], 1)
+        self.assertEqual(coverage[(2022, "youtube")]["comments"], 0)
+        self.assertEqual(coverage[(2021, "youtube")]["accepted_posts"], 1)
+        self.assertEqual(sum(row["comments"] for row in coverage.values()), self.store.comment_count())
+        _write_final_report(self.store, run, progress)
+        with open(os.path.join(self.tmp, "final_report.md"), encoding="utf-8") as report:
+            text = report.read()
+        self.assertIn("| 2021 | youtube | 1 | 1 | 1 | 2 |", text)
+        self.assertIn("| youtube | failed | 1 |", text)
 
     def test_enqueue_dedup_and_claim(self):
         self.assertTrue(self.store.enqueue("youtube", "search", {"q": "a"}))

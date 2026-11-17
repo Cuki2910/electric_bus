@@ -1,5 +1,6 @@
 """Topic gate for Vietnam electric-bus content."""
 
+import hashlib
 import re
 import unicodedata
 
@@ -48,6 +49,9 @@ _VN_EVIDENCE = re.compile(
     r"sai gon|ha noi|ben xe|tram dung)(?!\w)",
     re.IGNORECASE,
 )
+GATE_VERSION = hashlib.sha256(
+    (GROUP_RX["electric_bus"].pattern + "\0" + _VN_EVIDENCE.pattern).encode("utf-8")
+).hexdigest()[:12]
 
 def gate_electric_bus_vietnam(title="", body=""):
     """Electric-bus gate plus Vietnam evidence (Vietnamese text or VN place/brand)."""

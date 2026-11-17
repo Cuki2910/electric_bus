@@ -80,7 +80,7 @@ def _api_get(path, params):
         url = f"{BASE_URL}/{path}?{urllib.parse.urlencode(call_params)}"
         req = urllib.request.Request(url)
         try:
-            with urllib.request.urlopen(req) as resp:
+            with urllib.request.urlopen(req, timeout=30) as resp:
                 data = json.loads(resp.read())
             estimated_quota_used += _QUOTA_COST.get(path, 1)
             return data
@@ -110,42 +110,43 @@ class YouTubeAPIError(Exception):
         super().__init__(f"{status} {reason}")
 
 
-def search_videos(keyword, published_after, published_before, max_results=50, max_pages=3, max_calls=75):
+def search_video_page(keyword, published_after, published_before, max_results=50, page_token=None):
     global search_call_count
+    params = {
+        "part": "snippet", "type": "video", "q": keyword,
+        "relevanceLanguage": "vi", "order": "date", "maxResults": max_results,
+        "publishedAfter": published_after, "publishedBefore": published_before,
+    }
+    if page_token:
+        params["pageToken"] = page_token
+    data = _api_get("search", params)
+    search_call_count += 1
+    videos = []
+    for item in data.get("items", []):
+        snippet = item["snippet"]
+        videos.append({
+            "video_id": item["id"]["videoId"], "title": snippet.get("title", ""),
+            "description": snippet.get("description", ""),
+            "published_at": snippet.get("publishedAt", ""),
+        })
+    return videos, data.get("nextPageToken")
+
+def search_videos(keyword, published_after, published_before, max_results=50, max_pages=3, max_calls=75):
     videos = []
     page_token = None
     for _ in range(max_pages):
         if max_calls is not None and search_call_count >= max_calls:
             break
-        params = {
-            "part": "snippet",
-            "type": "video",
-            "q": keyword,
-            "relevanceLanguage": "vi",
-            "order": "date",
-            "maxResults": max_results,
-            "publishedAfter": published_after,
-            "publishedBefore": published_before,
-        }
-        if page_token:
-            params["pageToken"] = page_token
         try:
-            data = _api_get("search", params)
-            search_call_count += 1
+            batch, page_token = search_video_page(
+                keyword, published_after, published_before, max_results, page_token
+            )
         except YouTubeAPIError as e:
             if e.reason in ("quotaExceeded", "rateLimitExceeded"):
                 raise
             print(f"[LỖI SEARCH PAGE] keyword={keyword!r} reason={e.reason}")
             break
-        for item in data.get("items", []):
-            snippet = item["snippet"]
-            videos.append({
-                "video_id": item["id"]["videoId"],
-                "title": snippet.get("title", ""),
-                "description": snippet.get("description", ""),
-                "published_at": snippet.get("publishedAt", ""),
-            })
-        page_token = data.get("nextPageToken")
+        videos.extend(batch)
         if not page_token or (max_calls is not None and search_call_count >= max_calls):
             break
     return videos

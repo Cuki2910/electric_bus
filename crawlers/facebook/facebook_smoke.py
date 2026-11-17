@@ -15,7 +15,7 @@ from crawlers.baseline_store import BaselineStore
 from crawlers.facebook import crawl_facebook as fb
 from crawlers.facebook import facebook_session as fbs
 from crawlers.facebook import facebook_worker as worker
-from crawlers.electric_bus.config import ELECTRIC_BUS_QUERIES
+from crawlers.electric_bus.config import ELECTRIC_BUS_QUERIES, SOURCES_VERSION, _parse_timestamp
 
 PRODUCTION_DIR = os.path.abspath("data/outputs/baseline_gate_v2/electric_bus")
 QUERY = ELECTRIC_BUS_QUERIES[0]
@@ -97,8 +97,8 @@ def _assert_smoke(store, selected_url, max_comments):
     assert context["verdict"] == "accept" and context["reason"] == "electric_bus"
     assert context["metadata_resolved"] == 1
     # Facebook may hide the total comment count; worker marks that capture unverified.
-    assert context["state"] in ("comments_done", "comments_unverified")
-    assert context["comment_capture_status"] in ("complete", "unverified")
+    assert context["state"] in ("comments_done", "comments_unverified", "comments_limited")
+    assert context["comment_capture_status"] in ("complete", "unverified", "limited")
     assert 1 <= len(comments) <= max_comments, f"expected 1..{max_comments} comments, got {len(comments)}"
     assert all(row["comment_text"].strip() for row in comments)
     assert all(row["posted_at_raw"] for row in comments)
@@ -122,7 +122,7 @@ def _assert_smoke(store, selected_url, max_comments):
     return qc, exports
 
 
-def run_smoke(base_dir, max_comments=10, timeout_seconds=900, max_candidates=5, url=None):
+def run_smoke(base_dir, max_comments=10, timeout_seconds=900, max_candidates=5, url=None, year=None):
     base_dir = os.path.abspath(base_dir)
     if os.path.commonpath((base_dir, PRODUCTION_DIR)) == PRODUCTION_DIR:
         raise ValueError("Smoke directory không được nằm trong production baseline directory")
@@ -134,7 +134,7 @@ def run_smoke(base_dir, max_comments=10, timeout_seconds=900, max_candidates=5, 
     store = BaselineStore(base_dir=base_dir)
     browser = None
     selected_url = None
-    result = {"ok": False, "base_dir": base_dir, "query": QUERY, "candidates": []}
+    result = {"ok": False, "base_dir": base_dir, "query": QUERY, "year": year, "candidates": []}
     deadline = time.monotonic() + timeout_seconds
     try:
         run = store.get_or_create_run(hours=1, target_minimum=1)
@@ -162,7 +162,7 @@ def run_smoke(base_dir, max_comments=10, timeout_seconds=900, max_candidates=5, 
                     if time.monotonic() >= deadline:
                         break
                     searched_queries.append(query)
-                    query_candidates = fb.search_posts(query, max_candidates)
+                    query_candidates = fb.search_posts(query, max_candidates, year=year)
                     candidates.extend(query_candidates)
                     for candidate_url in query_candidates:
                         try:
@@ -187,6 +187,7 @@ def run_smoke(base_dir, max_comments=10, timeout_seconds=900, max_candidates=5, 
                                 "resolved_url": metadata_url,
                                 "verdict": verdict,
                                 "reason": reason,
+                                "post_published_at": metadata.get("post_published_at"),
                             })
                         except Exception as exc:
                             result["candidates"].append({
@@ -194,6 +195,9 @@ def run_smoke(base_dir, max_comments=10, timeout_seconds=900, max_candidates=5, 
                                 "url": candidate_url,
                                 "error": f"{type(exc).__name__}: {str(exc)[:200]}",
                             })
+                            continue
+                        published = _parse_timestamp(metadata.get("post_published_at"))
+                        if year is not None and (published is None or published.year != year):
                             continue
                         if verdict == "accept" and metadata.get("post_published_at") and fb.post_in_window(metadata["post_published_at"]):
                             selected_url = metadata_url
@@ -205,7 +209,7 @@ def run_smoke(base_dir, max_comments=10, timeout_seconds=900, max_candidates=5, 
             if not selected_url:
                 raise RuntimeError(f"Không tìm thấy post accept trong {len(candidates)} candidates qua {len(searched_queries)} queries: {result['candidates']}")
 
-        store.kv_set("facebook_seeded", True)
+        store.kv_set(f"facebook_seeded:{SOURCES_VERSION}", True)
         store.enqueue(
             "facebook",
             "discover",
@@ -228,6 +232,9 @@ def run_smoke(base_dir, max_comments=10, timeout_seconds=900, max_candidates=5, 
             raise RuntimeError(f"Smoke worker failed: {status}")
 
         qc, exports = _assert_smoke(store, selected_url, max_comments)
+        if year is not None:
+            context = store.conn.execute("SELECT post_published_at FROM contexts WHERE platform='facebook'").fetchone()
+            assert _parse_timestamp(context["post_published_at"]).year == year, "Post does not match requested year"
         production_after = _production_snapshot()
         youtube_after = _youtube_pids()
         assert production_after == production_before, "Facebook production state changed during smoke"
@@ -264,11 +271,12 @@ def main():
         ),
     )
     parser.add_argument("--url")
+    parser.add_argument("--year", type=int)
     parser.add_argument("--max-comments", type=int, default=10)
     parser.add_argument("--max-candidates", type=int, default=5)
     parser.add_argument("--timeout-seconds", type=int, default=900)
     args = parser.parse_args()
-    result = run_smoke(args.base_dir, args.max_comments, args.timeout_seconds, args.max_candidates, args.url)
+    result = run_smoke(args.base_dir, args.max_comments, args.timeout_seconds, args.max_candidates, args.url, args.year)
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 

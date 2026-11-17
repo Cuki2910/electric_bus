@@ -280,6 +280,13 @@ class BaselineStore:
         with self._tx() as c:
             c.execute("UPDATE discovery_queue SET status=?, lease_at=0 WHERE id=?", (status, task_id))
 
+    def checkpoint_task(self, task_id, payload):
+        with self._tx() as connection:
+            connection.execute(
+                "UPDATE discovery_queue SET payload=?, lease_at=? WHERE id=?",
+                (json.dumps(payload, ensure_ascii=False), time.time(), task_id),
+            )
+
     def retry_task(self, task_id, delay=60, max_attempts=5):
         with self._tx() as c:
             row = c.execute("SELECT attempts FROM discovery_queue WHERE id=?", (task_id,)).fetchone()
@@ -472,6 +479,37 @@ class BaselineStore:
         ).fetchall()
         return {(r["platform"], r["verdict"]): r["n"] for r in rows}
 
+    def coverage_by_year(self):
+        """Counts by post publication year in Vietnam time, including empty years."""
+        from crawlers.electric_bus.config import window
+
+        start, end = window()
+        rows = {
+            (year, platform): {"year": year, "platform": platform, "accepted_posts": 0,
+                               "top_level": 0, "replies": 0, "comments": 0}
+            for year in range(start.year, end.year + 1)
+            for platform in ("facebook", "youtube")
+        }
+        for context in self.conn.execute(
+            "SELECT platform, CAST(strftime('%Y',post_published_at,'+7 hours') AS INTEGER) year, COUNT(*) total "
+            "FROM contexts WHERE verdict='accept' GROUP BY platform, year"
+        ):
+            key = (context["year"], context["platform"])
+            if key in rows:
+                rows[key]["accepted_posts"] = context["total"]
+        for comment in self.conn.execute(
+            "SELECT platform, CAST(strftime('%Y',post_published_at,'+7 hours') AS INTEGER) year, "
+            "comment_type, COUNT(*) total FROM comments "
+            "WHERE platform!='facebook' OR facebook_comment_time_valid(posted_at_raw,posted_at)=1 "
+            "GROUP BY platform, year, comment_type"
+        ):
+            key = (comment["year"], comment["platform"])
+            if key in rows:
+                column = "replies" if comment["comment_type"] == "reply" else "top_level"
+                rows[key][column] += comment["total"]
+                rows[key]["comments"] += comment["total"]
+        return list(rows.values())
+
     # ---- kv checkpoints ---------------------------------------------------
     def kv_get(self, key, default=None):
         row = self.conn.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
@@ -554,6 +592,10 @@ class BaselineStore:
             "youtube_rejected": ctx.get(("youtube", "reject"), 0),
             "facebook_status": self.kv_get("facebook_status", "idle"),
             "youtube_status": self.kv_get("youtube_status", "idle"),
+            "coverage_by_year": self.coverage_by_year(),
+            "discovery_by_status": [dict(row) for row in self.conn.execute(
+                "SELECT platform, status, COUNT(*) total FROM discovery_queue GROUP BY platform, status"
+            )],
         }
         path = os.path.join(self.base_dir, "progress.json")
         tmp = path + ".tmp"

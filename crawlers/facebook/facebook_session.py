@@ -10,13 +10,15 @@ load_env()
 
 try:
     from scrapling.fetchers import StealthySession
+    from scrapling.parser import Selector
 except ImportError:
     StealthySession = None
+    Selector = None
 
 PROFILE_DIR = os.path.abspath(os.getenv("FB_PROFILE_DIR", ".secrets/facebook_profile"))
 CREDENTIALS_FILE = os.path.abspath(".secrets/facebook.env")
 CHALLENGE_SHOT = os.path.abspath(".secrets/auth_challenge.png")
-NAV_TIMEOUT_MS = 90000
+NAV_TIMEOUT_MS = 30000
 
 AUTH_OK = "ok"
 AUTH_LOGIN_FORM = "login_form"
@@ -150,6 +152,7 @@ class FacebookSession:
         self.session = None
         self.auth_page = None
         self.owner_thread = None
+        self.closed = True
 
     def start(self):
         if self.session is not None:
@@ -163,6 +166,7 @@ class FacebookSession:
             locale="vi-VN",
             network_idle=False,
             timeout=NAV_TIMEOUT_MS,
+            retries=1,
             block_ads=True,
             hide_canvas=True,
             block_webrtc=True,
@@ -184,6 +188,8 @@ class FacebookSession:
             raise
         self.session = session
         self.owner_thread = threading.get_ident()
+        self.closed = False
+        session.context.on("close", lambda context: setattr(self, "closed", True))
         return self
 
     def _check_thread(self):
@@ -192,16 +198,41 @@ class FacebookSession:
 
     def close(self):
         self._check_thread()
-        if self.session is not None:
-            self.session.close()
-        self.session = None
-        self.auth_page = None
-        self.owner_thread = None
+        try:
+            if self.session is not None:
+                self.session.close()
+        except Exception:
+            if not self.closed:
+                raise
+        finally:
+            self.session = None
+            self.auth_page = None
+            self.owner_thread = None
+            self.closed = True
 
-    def fetch(self, url, **kwargs):
+    def fetch(self, url, page_action=None, wait_selector=None, wait_selector_state="attached",
+              timeout=NAV_TIMEOUT_MS, network_idle=False):
         self.start()
         self._check_thread()
-        return self.session.fetch(url, **kwargs)
+        page = self.session.context.new_page()
+        try:
+            page.set_default_timeout(timeout)
+            page.goto(url, wait_until="domcontentloaded", timeout=timeout)
+            if wait_selector:
+                try:
+                    page.locator(wait_selector).first.wait_for(state=wait_selector_state)
+                except Exception:
+                    state = _auth_state(page)
+                    if state != AUTH_OK:
+                        raise FacebookAuthRequiredError(state) from None
+                    raise
+            if network_idle:
+                page.wait_for_load_state("networkidle")
+            if page_action:
+                page_action(page)
+            return Selector(page.content(), url=page.url)
+        finally:
+            page.close()
 
     def _page(self):
         self.start()

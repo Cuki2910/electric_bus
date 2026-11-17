@@ -1,5 +1,6 @@
 ﻿import importlib
 import os
+from crawlers.electric_bus.config import SOURCES_VERSION
 import shutil
 import tempfile
 import time
@@ -11,7 +12,31 @@ yt = importlib.import_module("crawlers.youtube.crawl_youtube")
 
 
 class YouTubeCrawlerTests(unittest.TestCase):
-    def test_june_and_july_searches_are_seeded_once(self):
+    def test_gate_change_requeues_previously_processed_rejects_without_search(self):
+        from crawlers.baseline_store import BaselineStore
+        from crawlers.youtube import youtube_worker
+
+        with tempfile.TemporaryDirectory() as directory, BaselineStore(base_dir=directory) as store:
+            store.kv_set(f"youtube_seeded:{SOURCES_VERSION}", True)
+            store.kv_set("youtube_processed_videos", ["eligible", "off_topic"])
+            for identity, body in (("eligible", "VinBus Hà Nội"), ("off_topic", "Xe máy Hà Nội")):
+                store.upsert_context({
+                    "platform": "youtube", "context_id": identity, "verdict": "reject", "reason": "old_gate",
+                    "post_context": body, "post_published_at": "2021-01-01T12:00:00+07:00", "state": "rejected",
+                })
+            youtube_worker.seed_queue(store)
+            youtube_worker.seed_queue(store)
+            self.assertEqual(store.conn.execute("SELECT COUNT(*) FROM discovery_queue").fetchone()[0], 0)
+            self.assertEqual(store.context("youtube", "eligible")["verdict"], "accept")
+            self.assertEqual(store.context("youtube", "eligible")["state"], "accepted")
+            self.assertEqual(store.context("youtube", "off_topic")["verdict"], "reject")
+            self.assertEqual(store.kv_get("youtube_processed_videos"), ["eligible", "off_topic"])
+            with patch.object(youtube_worker, "_crawl_video") as crawl:
+                youtube_worker._drain_accepted_contexts(store, {"run_id": "run"}, lambda: False, "batch", {"eligible"})
+            self.assertEqual(crawl.call_args.args[1]["video_id"], "eligible")
+            self.assertEqual(store.context("youtube", "eligible")["state"], "comments_done")
+
+    def test_history_is_seeded_once_despite_legacy_flags(self):
         import json
         from crawlers.baseline_store import BaselineStore
         from crawlers.electric_bus.config import ELECTRIC_BUS_QUERIES
@@ -21,15 +46,14 @@ class YouTubeCrawlerTests(unittest.TestCase):
         store = BaselineStore(base_dir=output_dir)
         try:
             store.kv_set("youtube_seeded", True)
+            store.kv_set("youtube_june_2026_backfill_seeded", True)
             youtube_worker.seed_queue(store)
             youtube_worker.seed_queue(store)
             rows = store.conn.execute("SELECT payload FROM discovery_queue WHERE platform='youtube'").fetchall()
-            self.assertEqual(len(rows), 2 * len(ELECTRIC_BUS_QUERIES))
+            self.assertEqual(len(rows), len(youtube_worker._search_specs()))
             intervals = {(p["after"], p["before"]) for row in rows for p in [json.loads(row["payload"])]}
-            self.assertEqual(intervals, {
-                ("2026-05-31T17:00:00Z", "2026-06-30T17:00:00Z"),
-                ("2026-06-30T17:00:00Z", "2026-07-31T17:00:00Z"),
-            })
+            self.assertEqual(min(after for after, _before in intervals), "2020-12-31T17:00:00Z")
+            self.assertGreater(len(intervals), 60)
         finally:
             store.close()
             shutil.rmtree(output_dir, ignore_errors=True)
@@ -41,6 +65,87 @@ class YouTubeCrawlerTests(unittest.TestCase):
             video = yt.search_videos("q", "2025-01-01T00:00:00Z", "2027-01-01T00:00:00Z", max_pages=1)[0]
         self.assertEqual(video["description"], "xe buýt chậm")
         self.assertEqual(video["published_at"], "2026-01-01T00:00:00Z")
+
+    def test_search_page_keeps_cursor(self):
+        with patch.object(yt, "_api_get", return_value={"items": [], "nextPageToken": "second"}) as api:
+            self.assertEqual(yt.search_video_page("q", "after", "before", page_token="first"), ([], "second"))
+        self.assertEqual(api.call_args.args[1]["pageToken"], "first")
+
+    def test_history_pagination_resumes_after_quota_without_duplicate_comments(self):
+        import json
+        from crawlers.baseline_store import BaselineStore
+        from crawlers.youtube import youtube_worker
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            store = BaselineStore(base_dir=output_dir)
+            try:
+                run = store.get_or_create_run(24, 5000)
+                store.kv_set(f"youtube_seeded:{SOURCES_VERSION}", True)
+                store.enqueue("youtube", "search", {"keyword": "VinBus", "after": "2020-12-31T17:00:00Z", "before": "2021-02-01T00:00:00Z"})
+                video = {"video_id": "v1", "title": "VinBus", "description": "", "published_at": "2021-01-01T00:00:00Z"}
+                snippet = {"textDisplay": "Good", "publishedAt": "2021-01-02T00:00:00Z"}
+                thread = {"snippet": {"topLevelComment": {"id": "top", "snippet": snippet}, "totalReplyCount": 1}}
+                reply = {"id": "reply", "snippet": snippet}
+                with patch.object(youtube_worker, "_revisit_current_year"), \
+                     patch.object(yt, "fetch_video_descriptions", return_value={"v1": "VinBus"}), \
+                     patch.object(yt, "fetch_comments", return_value=[thread]), \
+                     patch.object(yt, "fetch_replies", return_value=[reply]), \
+                     patch.object(yt, "search_video_page", side_effect=[([video], "second"), yt.YouTubeAPIError(403, "quotaExceeded", {})]):
+                    result = youtube_worker.run_once(store, run, lambda: False, "first")
+                self.assertEqual(result["status"], "quota_wait")
+                self.assertEqual(store.comment_count(), 2)
+                task = store.conn.execute("SELECT payload,status FROM discovery_queue WHERE status='pending'").fetchone()
+                self.assertEqual(json.loads(task["payload"])["page_token"], "second")
+                store.close()
+                store = BaselineStore(base_dir=output_dir)
+                with patch.object(youtube_worker, "_revisit_current_year"), \
+                     patch.object(yt, "search_video_page", return_value=([video], None)) as search, \
+                     patch.object(yt, "fetch_video_descriptions") as descriptions, \
+                     patch.object(youtube_worker, "_crawl_video") as crawl:
+                    result = youtube_worker.run_once(store, run, lambda: False, "second")
+                self.assertEqual(result["status"], "queue_empty")
+                self.assertEqual(search.call_args.kwargs["page_token"], "second")
+                crawl.assert_not_called()
+                descriptions.assert_not_called()
+                self.assertEqual(store.comment_count(), 2)
+                self.assertEqual(store.pending_count("youtube"), 0)
+            finally:
+                store.close()
+
+    def test_worker_retries_description_failure_without_rejecting_video(self):
+        from crawlers.baseline_store import BaselineStore
+        from crawlers.youtube import youtube_worker
+
+        with tempfile.TemporaryDirectory() as output_dir, BaselineStore(base_dir=output_dir) as store:
+            run = store.get_or_create_run(24, 5000)
+            store.kv_set(f"youtube_seeded:{SOURCES_VERSION}", True)
+            store.enqueue("youtube", "search", {"keyword": "VinBus", "after": "2021-01-01T00:00:00Z", "before": "2022-01-01T00:00:00Z"})
+            video = {"video_id": "v1", "title": "Review", "description": "", "published_at": "2021-02-01T00:00:00Z"}
+            with patch.object(youtube_worker, "_revisit_current_year"), \
+                 patch.object(yt, "search_video_page", return_value=([video], None)), \
+                 patch.object(yt, "fetch_video_descriptions", side_effect=OSError("offline")):
+                result = youtube_worker.run_once(store, run, lambda: False, "batch")
+            self.assertEqual(result["status"], "retry_wait")
+            self.assertIsNone(store.context("youtube", "v1"))
+            self.assertEqual(store.pending_count("youtube"), 1)
+
+    def test_expired_page_token_restarts_window_without_losing_task(self):
+        import json
+        from crawlers.baseline_store import BaselineStore
+        from crawlers.youtube import youtube_worker
+
+        with tempfile.TemporaryDirectory() as output_dir, BaselineStore(base_dir=output_dir) as store:
+            run = store.get_or_create_run(24, 5000)
+            store.kv_set(f"youtube_seeded:{SOURCES_VERSION}", True)
+            store.enqueue("youtube", "search", {"keyword": "VinBus", "after": "after", "before": "before", "page_token": "expired"})
+            with patch.object(youtube_worker, "_revisit_current_year"), \
+                 patch.object(yt, "search_video_page", side_effect=yt.YouTubeAPIError(400, "invalidPageToken", {})):
+                youtube_worker.run_once(store, run, lambda: False, "batch")
+            task = store.conn.execute("SELECT payload,status FROM discovery_queue").fetchone()
+            self.assertEqual(task["status"], "pending")
+            payload = json.loads(task["payload"])
+            self.assertNotIn("page_token", payload)
+            self.assertEqual(payload["page_restart"], 1)
 
     def test_worker_record_keeps_post_metadata_and_comment_labels(self):
         from crawlers.youtube import youtube_worker
@@ -123,118 +228,54 @@ class YouTubeCrawlerTests(unittest.TestCase):
             shutil.rmtree(legacy_dir, ignore_errors=True)
             shutil.rmtree(output_dir, ignore_errors=True)
 
-    def test_deficit_refresh_ranks_largest_first(self):
+    def test_worker_skips_old_refresh_tasks_and_continues_search(self):
         from crawlers.baseline_store import BaselineStore
         from crawlers.youtube import youtube_worker
 
-        output_dir = tempfile.mkdtemp(prefix="yt_deficit_")
-        store = BaselineStore(base_dir=output_dir)
-        try:
+        with tempfile.TemporaryDirectory() as directory, BaselineStore(base_dir=directory) as store:
             run = store.get_or_create_run(24, 5000)
-            for video_id in ("v1", "v2"):
-                store.upsert_context({
-                    "platform": "youtube", "context_id": video_id, "source_url": "u",
-                    "post_title": "t", "post_context": "t\nd", "post_published_at_raw": "t",
-                    "post_published_at": "t", "verdict": "accept", "reason": "electric_bus",
-                    "metadata_resolved": 1, "matched_groups": "", "co_thanh_pho_khac": 0,
-                    "discovery_source": "search", "discovery_query": "q", "state": "comments_done",
-                    "crawled_at": "now",
-                })
-            with patch.object(yt, "fetch_video_comment_counts", return_value={"v1": 10, "v2": 100}):
-                self.assertEqual(youtube_worker.seed_deficit_refresh(store), 2)
-            tasks = store.conn.execute(
-                "SELECT payload,priority FROM discovery_queue WHERE source='refresh_comments' ORDER BY priority,id"
-            ).fetchall()
-            self.assertIn('"video_id": "v2"', tasks[0]["payload"])
-            self.assertEqual(tasks[0]["priority"], -100)
-            self.assertEqual(tasks[1]["priority"], -10)
-        finally:
-            store.close()
-            shutil.rmtree(output_dir, ignore_errors=True)
-
-    def test_refresh_task_is_checkpointed_and_deduped(self):
-        from crawlers.baseline_store import BaselineStore
-        from crawlers.youtube import youtube_worker
-
-        output_dir = tempfile.mkdtemp(prefix="yt_refresh_")
-        store = BaselineStore(base_dir=output_dir)
-        try:
-            run = store.get_or_create_run(24, 5000)
-            store.kv_set("youtube_seeded", True)
-            store.kv_set("youtube_june_2026_backfill_seeded", True)
-            store.kv_set("youtube_deficit_ranked_hour", time.strftime("%Y%m%d%H", time.gmtime()))
-            store.upsert_context({
-                "platform": "youtube", "context_id": "v1", "source_url": "u",
-                "post_title": "t", "post_context": "t\nd", "post_published_at_raw": "t",
-                "post_published_at": "t", "verdict": "accept", "reason": "electric_bus",
-                "metadata_resolved": 1, "matched_groups": "", "co_thanh_pho_khac": 0,
-                "discovery_source": "search", "discovery_query": "q", "state": "comments_done",
-                "crawled_at": "now",
-            })
-            store.enqueue("youtube", "refresh_comments", {
-                "video_id": "v1", "comment_count": 10, "stored_count": 0, "deficit": 10,
-            }, priority=-10)
-            with patch.object(youtube_worker, "_crawl_video", return_value=0), \
-                 patch.object(youtube_worker, "_revisit_current_year"):
+            store.kv_set(f"youtube_seeded:{SOURCES_VERSION}", True)
+            store.upsert_context({"platform": "youtube", "context_id": "old", "verdict": "accept",
+                                  "state": "comments_done", "comment_retry_count": 2})
+            store.enqueue("youtube", "refresh_comments", {"video_id": "old", "deficit": 1}, priority=-1)
+            store.enqueue("youtube", "search", {"keyword": "VinBus", "after": "after", "before": "before"})
+            with patch.object(youtube_worker, "_revisit_current_year"), \
+                 patch.object(yt, "fetch_video_comment_counts") as counts, \
+                 patch.object(yt, "search_video_page", return_value=([], None)) as search, \
+                 patch.object(youtube_worker, "_crawl_video") as capture:
                 result = youtube_worker.run_once(store, run, lambda: False, "batch")
             self.assertEqual(result["status"], "queue_empty")
-            task = store.conn.execute("SELECT status FROM discovery_queue WHERE source='refresh_comments'").fetchone()
-            self.assertEqual(task["status"], "done")
-        finally:
-            store.close()
-            shutil.rmtree(output_dir, ignore_errors=True)
+            counts.assert_not_called()
+            capture.assert_not_called()
+            search.assert_called_once_with("VinBus", "after", "before", page_token=None)
+            self.assertEqual(store.context("youtube", "old")["comment_retry_count"], 2)
+            self.assertEqual(store.conn.execute(
+                "SELECT status FROM discovery_queue WHERE source='refresh_comments'"
+            ).fetchone()[0], "skipped")
 
-    def test_deficit_refresh_excludes_video_after_max_retries(self):
+    def test_worker_skips_stale_running_refresh_task(self):
         from crawlers.baseline_store import BaselineStore
         from crawlers.youtube import youtube_worker
 
-        output_dir = tempfile.mkdtemp(prefix="yt_deficit_stuck_")
-        store = BaselineStore(base_dir=output_dir)
-        try:
-            store.upsert_context({
-                "platform": "youtube", "context_id": "v1", "source_url": "u",
-                "post_title": "t", "post_context": "t\nd", "post_published_at_raw": "t",
-                "post_published_at": "t", "verdict": "accept", "reason": "electric_bus",
-                "metadata_resolved": 1, "matched_groups": "", "co_thanh_pho_khac": 0,
-                "discovery_source": "search", "discovery_query": "q", "state": "comments_done",
-                "crawled_at": "now", "comment_retry_count": youtube_worker._MAX_REFRESH_RETRIES,
-            })
-            with patch.object(yt, "fetch_video_comment_counts", return_value={"v1": 999}):
-                queued = youtube_worker.seed_deficit_refresh(store)
-            self.assertEqual(queued, 0)
-        finally:
-            store.close()
-            shutil.rmtree(output_dir, ignore_errors=True)
-
-    def test_refresh_zero_added_bumps_retry_count(self):
-        from crawlers.baseline_store import BaselineStore
-        from crawlers.youtube import youtube_worker
-
-        output_dir = tempfile.mkdtemp(prefix="yt_refresh_zero_")
-        store = BaselineStore(base_dir=output_dir)
-        try:
+        with tempfile.TemporaryDirectory() as directory, BaselineStore(base_dir=directory) as store:
             run = store.get_or_create_run(24, 5000)
-            store.kv_set("youtube_seeded", True)
-            store.kv_set("youtube_june_2026_backfill_seeded", True)
-            store.kv_set("youtube_deficit_ranked_hour", time.strftime("%Y%m%d%H", time.gmtime()))
-            store.upsert_context({
-                "platform": "youtube", "context_id": "v1", "source_url": "u",
-                "post_title": "t", "post_context": "t\nd", "post_published_at_raw": "t",
-                "post_published_at": "t", "verdict": "accept", "reason": "electric_bus",
-                "metadata_resolved": 1, "matched_groups": "", "co_thanh_pho_khac": 0,
-                "discovery_source": "search", "discovery_query": "q", "state": "comments_done",
-                "crawled_at": "now",
-            })
-            store.enqueue("youtube", "refresh_comments", {
-                "video_id": "v1", "comment_count": 10, "stored_count": 0, "deficit": 10,
-            }, priority=-10)
-            with patch.object(youtube_worker, "_crawl_video", return_value=0), \
-                 patch.object(youtube_worker, "_revisit_current_year"):
-                youtube_worker.run_once(store, run, lambda: False, "batch")
-            self.assertEqual(store.context("youtube", "v1")["comment_retry_count"], 1)
-        finally:
-            store.close()
-            shutil.rmtree(output_dir, ignore_errors=True)
+            store.kv_set(f"youtube_seeded:{SOURCES_VERSION}", True)
+            store.enqueue("youtube", "refresh_comments", {"video_id": "old", "deficit": 1})
+            task = store.claim("youtube")
+            store.conn.execute("UPDATE discovery_queue SET lease_at=0 WHERE id=?", (task["id"],))
+            with patch.object(youtube_worker, "_revisit_current_year"), \
+                 patch.object(youtube_worker, "_crawl_video") as capture:
+                result = youtube_worker.run_once(store, run, lambda: False, "batch")
+            self.assertEqual(result["status"], "queue_empty")
+            capture.assert_not_called()
+            self.assertEqual(store.conn.execute("SELECT status FROM discovery_queue").fetchone()[0], "skipped")
+
+    def test_api_request_has_a_network_timeout(self):
+        with patch.object(yt.urllib.request, "urlopen", side_effect=TimeoutError), \
+             patch.object(yt.time, "sleep"):
+            with self.assertRaises(TimeoutError):
+                yt._api_get("search", {})
+            self.assertEqual(yt.urllib.request.urlopen.call_args.kwargs["timeout"], 30)
 
     def test_api_get_reclassifies_daily_search_quota_as_quota_exceeded(self):
         import io
@@ -268,7 +309,8 @@ class YouTubeCrawlerTests(unittest.TestCase):
         success.__enter__.return_value.read.return_value = b'{"items": []}'
         seen_urls = []
 
-        def urlopen(req):
+        def urlopen(req, timeout):
+            self.assertEqual(timeout, 30)
             seen_urls.append(req.full_url)
             if len(seen_urls) == 1:
                 raise http_error
@@ -313,13 +355,12 @@ class YouTubeCrawlerTests(unittest.TestCase):
         store = BaselineStore(base_dir=output_dir)
         try:
             run = store.get_or_create_run(24, 5000)
-            store.kv_set("youtube_seeded", True)
-            store.kv_set("youtube_june_2026_backfill_seeded", True)
+            store.kv_set(f"youtube_seeded:{SOURCES_VERSION}", True)
             store.enqueue("youtube", "search", {
                 "keyword": "q", "after": "2026-01-01T00:00:00Z", "before": "2027-01-01T00:00:00Z",
             })
             error = yt.YouTubeAPIError(403, "rateLimitExceeded", {})
-            with patch.object(yt, "search_videos", side_effect=error):
+            with patch.object(yt, "search_video_page", side_effect=error):
                 result = youtube_worker.run_once(store, run, lambda: False, "batch")
 
             task = store.conn.execute(
@@ -340,15 +381,14 @@ class YouTubeCrawlerTests(unittest.TestCase):
         store = BaselineStore(base_dir=output_dir)
         try:
             run = store.get_or_create_run(24, 5000)
-            store.kv_set("youtube_seeded", True)
-            store.kv_set("youtube_june_2026_backfill_seeded", True)
+            store.kv_set(f"youtube_seeded:{SOURCES_VERSION}", True)
             error = yt.YouTubeAPIError(403, "rateLimitExceeded", {})
             delays = []
             for index in range(3):
                 store.enqueue("youtube", "search", {
                     "keyword": f"q{index}", "after": "2026-01-01T00:00:00Z", "before": "2027-01-01T00:00:00Z",
                 })
-                with patch.object(yt, "search_videos", side_effect=error):
+                with patch.object(yt, "search_video_page", side_effect=error):
                     delays.append(youtube_worker.run_once(store, run, lambda: False, "batch")["retry_seconds"])
             self.assertEqual(delays, [900, 1800, 3600])
 
@@ -357,7 +397,7 @@ class YouTubeCrawlerTests(unittest.TestCase):
             ).fetchone()
             store.conn.execute("UPDATE discovery_queue SET next_retry_at=0 WHERE id=?", (pending["id"],))
             store.conn.commit()
-            with patch.object(yt, "search_videos", return_value=[]):
+            with patch.object(yt, "search_video_page", return_value=([], None)):
                 youtube_worker.run_once(store, run, lambda: False, "batch")
             self.assertEqual(store.kv_get("youtube_rate_limit_failures"), 0)
         finally:

@@ -66,6 +66,16 @@ def snapshot(rng):
             totals[f"{p}_{kind}"] = totals.get(f"{p}_{kind}", 0) + 1
         recent = {p: sum(1 for q, _, t in rows if q == p and t >= now - timedelta(minutes=15)) * 4
                   for p in ("facebook", "youtube")}
+        year_counts = {year: {"year": year, "facebook": 0, "youtube": 0}
+                       for year in range(2021, now.astimezone(VN).year + 1)}
+        for record in c.execute(
+            "SELECT CAST(strftime('%Y',post_published_at,'+7 hours') AS INTEGER) year, "
+            "platform, COUNT(*) total FROM comments WHERE crawled_at IS NOT NULL "
+            "GROUP BY year, platform"
+        ):
+            counts = year_counts.setdefault(record["year"],
+                                            {"year": record["year"], "facebook": 0, "youtube": 0})
+            counts[record["platform"]] = record["total"]
         reasons = {}
         for r in c.execute("SELECT platform, verdict, reason, crawled_at FROM contexts"):
             if r["crawled_at"] and _ts(r["crawled_at"]) < start:
@@ -84,6 +94,7 @@ def snapshot(rng):
             "run": dict(run) if run else None,
             "status": {p: _kv(c, f"{p}_status") for p in ("facebook", "youtube")},
             "totals": totals, "total": len(rows), "recent_per_hour": recent,
+            "year_counts": [year_counts[year] for year in sorted(year_counts, key=lambda year: (year is None, year))],
             "times": [t.isoformat() for t in times], "series": series, "base": base0,
             "reasons": reasons, "queue": queue, "events": events,
         }
@@ -140,7 +151,6 @@ h1{font-size:18px;margin:0}h2{font-size:14px;margin:0 0 8px}
 .grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(200px,1fr))}
 .card{background:var(--surface);border:1px solid var(--ring);border-radius:12px;padding:14px 16px;min-width:0}
 .big{font-size:30px;font-weight:600;line-height:1.1}.lab{color:var(--ink2);font-size:12px}
-.bar{height:8px;background:var(--grid);border-radius:4px;margin:8px 0 4px;overflow:hidden}.bar i{display:block;height:100%;background:var(--yt);border-radius:4px}
 .key{display:inline-block;width:14px;height:0;border-top:2px solid;vertical-align:middle;margin-right:6px}
 .legend{display:flex;gap:16px;color:var(--ink2);font-size:12px;margin-bottom:6px}
 .stat{display:inline-flex;gap:6px;align-items:center;font-weight:600}.ok{color:var(--good)}.wait{color:var(--warn)}.err{color:var(--bad)}
@@ -166,6 +176,11 @@ select{font:inherit;background:var(--surface);color:var(--ink);border:1px solid 
 <button data-r="all" aria-pressed="false">Tất cả</button></div></div>
 <div class="grid" id="tiles"></div>
 <div class="stack">
+<div class="card"><h2>Bình luận theo năm đăng bài/video</h2>
+<p class="sub">Toàn bộ dữ liệu, gồm bình luận gốc và phản hồi. Theo năm đăng bài/video (giờ Việt Nam), không phải năm viết bình luận; không đổi theo bộ lọc thời gian.</p>
+<div class="scroll"><table><caption class="sub">Phân bố bình luận theo năm và nền tảng</caption>
+<thead><tr><th scope="col">Năm</th><th scope="col" class="n">Facebook</th><th scope="col" class="n">YouTube</th><th scope="col" class="n">Tổng</th><th scope="col" class="n">Tỷ trọng</th></tr></thead>
+<tbody id="years"></tbody></table></div></div>
 <div class="card"><h2>Comment mới (từ đầu khoảng)</h2>
 <div class="legend"><span><span class="key" style="border-color:var(--fb)"></span>Facebook</span><span><span class="key" style="border-color:var(--yt)"></span>YouTube</span>
 <button class="btn" id="tbl" style="margin-left:auto;padding:2px 10px">Xem bảng</button></div>
@@ -179,7 +194,7 @@ select{font:inherit;background:var(--surface);color:var(--ink);border:1px solid 
 <div class="scroll"><table><thead><tr><th>Giờ (VN)</th><th>Loại</th><th>Nền tảng</th><th>Chi tiết</th></tr></thead><tbody id="ev"></tbody></table></div></div>
 </div><div class="tip" id="tip"></div></main>
 <script>
-const $=s=>document.querySelector(s),NS="http://www.w3.org/2000/svg",TARGET_FALLBACK=5000;
+const $=s=>document.querySelector(s),NS="http://www.w3.org/2000/svg";
 const fmt=n=>Number(n||0).toLocaleString("vi-VN"),css=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 const hm=(iso,full)=>new Date(iso).toLocaleString("vi-VN",{timeZone:"Asia/Ho_Chi_Minh",hour:"2-digit",minute:"2-digit",...(full?{day:"2-digit",month:"2-digit"}:{})});
 let range="run",data=null,kind="",lastOk=0;
@@ -193,17 +208,21 @@ function showTip(host,x,y,rows,head){tip.replaceChildren();if(head)tip.append(el
 const hideTip=()=>tip.style.display="none";
 function statusView(s){const m={running:["▶","ok","đang chạy"],queue_empty:["✓","ok","hết hàng đợi"],quota_wait:["⏸","wait","chờ quota"],auth_required:["⚠","err","cần đăng nhập"],quarantined:["✕","err","bị cách ly"],idle:["•","wait","nghỉ"]};
  return m[s]||["?","wait",String(s||"không rõ")]}
-function tiles(){const d=data,t=d.totals,tar=(d.run&&d.run.target_minimum)||TARGET_FALLBACK,pct=Math.min(100,d.total/tar*100);
- const rate=d.recent_per_hour.facebook+d.recent_per_hour.youtube,left=Math.max(0,tar-d.total);
- const eta=left===0?"đã đạt":rate>0?"~"+(left/rate).toFixed(1)+" giờ nữa":"chưa có tốc độ";
+function tiles(){const d=data;
  const box=$("#tiles");box.replaceChildren();
- const c1=el("div",{class:"card"});c1.append(el("div",{class:"lab"},"Tổng comment / mục tiêu"),el("div",{class:"big"},fmt(d.total)+" / "+fmt(tar)));
- const b=el("div",{class:"bar"});b.append(el("i",{style:"width:"+pct+"%"}));c1.append(b,el("div",{class:"lab"},pct.toFixed(0)+"% · "+eta));
+ const c1=el("div",{class:"card"});c1.append(el("div",{class:"lab"},"Tổng comment"),el("div",{class:"big"},fmt(d.total)));
  const mk=(label,p,color)=>{const c=el("div",{class:"card"}),s=statusView(d.status[p]);
   c.append(el("div",{class:"lab"},label),el("div",{class:"big",style:"color:var(--ink)"},fmt((d.totals[p+"_top_level"]||0)+(d.totals[p+"_reply"]||0))));
   c.append(el("div",{class:"lab"},fmt(d.totals[p+"_top_level"])+" gốc · "+fmt(d.totals[p+"_reply"])+" trả lời · "+fmt(d.recent_per_hour[p])+"/giờ"));
   const st=el("div",{class:"stat "+s[1]});st.append(el("span",{},s[0]),el("span",{},s[2]));c.append(st);return c};
  box.append(c1,mk("Facebook","facebook"),mk("YouTube","youtube"))}
+function years(){const body=$("#years");body.replaceChildren();
+ for(const counts of data.year_counts){const total=counts.facebook+counts.youtube,row=el("tr");
+  const share=data.total?total/data.total*100:0;
+  row.append(el("th",{scope:"row"},counts.year==null?"Chưa rõ":String(counts.year)),
+   el("td",{class:"n"},fmt(counts.facebook)),el("td",{class:"n"},fmt(counts.youtube)),
+   el("td",{class:"n"},fmt(total)),el("td",{class:"n"},share.toLocaleString("vi-VN",{maximumFractionDigits:1})+"%"));
+  body.append(row)}}
 function chart(){const host=$("#chart");host.querySelector("svg")?.remove();
  const d=data,W=Math.max(320,host.clientWidth||600),H=260,m={l:46,r:12,t:10,b:24},iw=W-m.l-m.r,ih=H-m.t-m.b;
  const xs=d.times.map(t=>+new Date(t)),ser=[{k:"facebook",n:"Facebook",c:css("--fb")},{k:"youtube",n:"YouTube",c:css("--yt")}];
@@ -244,7 +263,7 @@ function events(){const sel=$("#kind"),kinds=[...new Set(data.events.map(e=>e.ki
  if(kinds.join()!==[...sel.options].slice(1).map(o=>o.value).join()){sel.replaceChildren(new Option("tất cả",""),...kinds.map(k=>new Option(k,k)));sel.value=kinds.includes(kind)?kind:""}
  const body=$("#ev");body.replaceChildren();for(const e of data.events.filter(e=>!kind||e.kind===kind)){const r=el("tr");r.append(el("td",{},hm(e.ts,true)),el("td",{},e.kind),el("td",{},e.platform||"—"),el("td",{class:"det"},e.detail||""));body.append(r)}}
 function render(){if(!data||tip.style.display==="block")return;const r=data.run;$("#runline").textContent=r?`${r.run_id} · bắt đầu ${hm(r.started_at,true)} · hạn ${hm(r.deadline_at,true)} (giờ VN)`:"chưa có run";
- tiles();chart();reasons();queue();events()}
+ tiles();years();chart();reasons();queue();events()}
 async function poll(){try{const res=await fetch("/api?range="+range,{cache:"no-store"});if(!res.ok)throw 0;data=await res.json();lastOk=Date.now();document.body.classList.remove("loading");render()}catch(e){}
  const age=(Date.now()-lastOk)/1000,live=$("#live");live.classList.toggle("stale",age>15);$("#upd").textContent=lastOk?(age>15?"mất kết nối "+Math.round(age)+"s":"cập nhật "+hm(new Date(lastOk).toISOString())):"đang tải"}
 $("#range").addEventListener("click",e=>{const b=e.target.closest("button");if(!b)return;range=b.dataset.r;document.querySelectorAll("#range button").forEach(x=>x.setAttribute("aria-pressed",x===b));document.body.classList.add("loading");poll()});

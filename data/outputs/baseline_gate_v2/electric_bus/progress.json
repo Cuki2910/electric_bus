@@ -1,21 +1,161 @@
 {
-  "run_id": "baseline_20261011_090229",
-  "started_at": "2026-10-11T09:02:29.110881+00:00",
-  "deadline_at": "2026-10-12T09:02:29.110881+00:00",
-  "now": "2026-10-11T15:25:17.160464+00:00",
-  "elapsed_hours": 6.38,
-  "remaining_hours": 17.62,
+  "run_id": "baseline_20261116_153417",
+  "started_at": "2026-11-16T15:34:17.184956+00:00",
+  "deadline_at": "2026-11-17T15:34:17.184956+00:00",
+  "now": "2026-11-17T01:35:14.300025+00:00",
+  "elapsed_hours": 10.02,
+  "remaining_hours": 13.98,
   "target_minimum": 5000,
-  "target_reached_at": null,
-  "total_unique_valid": 4721,
-  "facebook_top_level": 2132,
-  "facebook_replies": 1136,
-  "youtube_top_level": 880,
-  "youtube_replies": 573,
-  "facebook_accepted": 231,
-  "facebook_rejected": 1399,
-  "youtube_accepted": 433,
-  "youtube_rejected": 2439,
-  "facebook_status": "stopped",
-  "youtube_status": "stopped"
+  "target_reached_at": "2026-11-16T15:34:22.152968+00:00",
+  "total_unique_valid": 62428,
+  "facebook_top_level": 20017,
+  "facebook_replies": 16630,
+  "youtube_top_level": 16201,
+  "youtube_replies": 9580,
+  "facebook_accepted": 1123,
+  "facebook_rejected": 2740,
+  "youtube_accepted": 4294,
+  "youtube_rejected": 24525,
+  "facebook_status": "auth_required",
+  "youtube_status": "quota_wait",
+  "coverage_by_year": [
+    {
+      "year": 2021,
+      "platform": "facebook",
+      "accepted_posts": 148,
+      "top_level": 2426,
+      "replies": 2286,
+      "comments": 4712
+    },
+    {
+      "year": 2021,
+      "platform": "youtube",
+      "accepted_posts": 307,
+      "top_level": 3131,
+      "replies": 1808,
+      "comments": 4939
+    },
+    {
+      "year": 2022,
+      "platform": "facebook",
+      "accepted_posts": 132,
+      "top_level": 4471,
+      "replies": 4008,
+      "comments": 8479
+    },
+    {
+      "year": 2022,
+      "platform": "youtube",
+      "accepted_posts": 491,
+      "top_level": 2343,
+      "replies": 1007,
+      "comments": 3350
+    },
+    {
+      "year": 2023,
+      "platform": "facebook",
+      "accepted_posts": 159,
+      "top_level": 2766,
+      "replies": 2395,
+      "comments": 5161
+    },
+    {
+      "year": 2023,
+      "platform": "youtube",
+      "accepted_posts": 584,
+      "top_level": 2421,
+      "replies": 1123,
+      "comments": 3544
+    },
+    {
+      "year": 2024,
+      "platform": "facebook",
+      "accepted_posts": 268,
+      "top_level": 4826,
+      "replies": 3748,
+      "comments": 8574
+    },
+    {
+      "year": 2024,
+      "platform": "youtube",
+      "accepted_posts": 882,
+      "top_level": 2682,
+      "replies": 1950,
+      "comments": 4632
+    },
+    {
+      "year": 2025,
+      "platform": "facebook",
+      "accepted_posts": 98,
+      "top_level": 2308,
+      "replies": 1937,
+      "comments": 4245
+    },
+    {
+      "year": 2025,
+      "platform": "youtube",
+      "accepted_posts": 1119,
+      "top_level": 3532,
+      "replies": 2101,
+      "comments": 5633
+    },
+    {
+      "year": 2026,
+      "platform": "facebook",
+      "accepted_posts": 318,
+      "top_level": 3220,
+      "replies": 2256,
+      "comments": 5476
+    },
+    {
+      "year": 2026,
+      "platform": "youtube",
+      "accepted_posts": 911,
+      "top_level": 2092,
+      "replies": 1591,
+      "comments": 3683
+    }
+  ],
+  "discovery_by_status": [
+    {
+      "platform": "facebook",
+      "status": "done",
+      "total": 2438
+    },
+    {
+      "platform": "facebook",
+      "status": "failed",
+      "total": 11
+    },
+    {
+      "platform": "facebook",
+      "status": "pending",
+      "total": 625
+    },
+    {
+      "platform": "facebook",
+      "status": "skipped",
+      "total": 244
+    },
+    {
+      "platform": "youtube",
+      "status": "done",
+      "total": 3059
+    },
+    {
+      "platform": "youtube",
+      "status": "failed",
+      "total": 34
+    },
+    {
+      "platform": "youtube",
+      "status": "pending",
+      "total": 613
+    },
+    {
+      "platform": "youtube",
+      "status": "skipped",
+      "total": 2
+    }
+  ]
 }

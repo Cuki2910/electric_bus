@@ -7,7 +7,7 @@ from crawlers.electric_bus.keywords import literal_terms
 
 HCM_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 UTC = timezone.utc
-SOURCES_VERSION = "electric_bus_sources_v2_2026-10"
+SOURCES_VERSION = "electric_bus_history_v1_2021"
 
 ELECTRIC_BUS_QUERIES = tuple(literal_terms("electric_bus"))
 
@@ -27,11 +27,11 @@ def _parse_timestamp(value):
     return parsed.astimezone(HCM_TZ)
 
 def window(now=None):
-    """Publication window: June 2026 through now (Vietnam time)."""
+    """Publication window: all of 2021 through now (Vietnam time)."""
     now = now or datetime.now(HCM_TZ)
     if now.tzinfo is None:
         now = now.replace(tzinfo=HCM_TZ)
-    return datetime(2026, 6, 1, tzinfo=HCM_TZ), now.astimezone(HCM_TZ)
+    return datetime(2021, 1, 1, tzinfo=HCM_TZ), now.astimezone(HCM_TZ)
 
 def post_in_window(value, now=None):
     published = _parse_timestamp(value)
@@ -49,9 +49,18 @@ def youtube_window(now=None):
     )
 
 def youtube_search_specs(now=None):
-    after, before = youtube_window(now)
-    for query in ELECTRIC_BUS_QUERIES:
-        yield {"keyword": query, "after": after, "before": before, "topic": "electric_bus"}
+    start, end = window(now)
+    while start < end:
+        next_month = start.replace(year=start.year + 1, month=1) if start.month == 12 else start.replace(month=start.month + 1)
+        before = min(next_month, end)
+        for query in ELECTRIC_BUS_QUERIES:
+            yield {
+                "keyword": query,
+                "after": start.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+                "before": before.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+                "topic": "electric_bus",
+            }
+        start = next_month
 
 # Known-VN public pages: crawled by feed, not search, so the VN gate is near-free.
 # Append more page URLs here (VinFast, Hanoi/HCMC bus operators, EV communities).
@@ -75,7 +84,7 @@ def facebook_sources():
             "label": f"electric_bus_page_{name}",
             "source_class": "electric_bus_page",
             "url": url,
-            "max_posts": 20,
+            "max_posts": None,
         }
         for name, url in FACEBOOK_PAGES
     ]
@@ -85,7 +94,7 @@ def facebook_sources():
             "label": f"electric_bus_{name}",
             "source_class": "electric_bus_group",
             "url": url,
-            "max_posts": 25,
+            "max_posts": None,
             "owner_name": title,
         }
         for name, url, title in FACEBOOK_GROUPS
@@ -97,6 +106,15 @@ def facebook_sources():
                 "label": f"electric_bus_{tag}_{index:02d}",
                 "source_class": "electric_bus_search",
                 "query": query,
-                "max_posts": 8,
+                "max_posts": None,
             })
     return sources
+
+def facebook_history_sources(now=None):
+    start, end = window(now)
+    for source in facebook_sources():
+        if source["kind"] in ("public_page", "video_search"):
+            yield source
+            continue
+        for year in range(start.year, end.year + 1):
+            yield {**source, "label": f"{source['label']}_{year}", "year": year}

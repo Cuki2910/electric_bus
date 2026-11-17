@@ -218,6 +218,29 @@ def _write_final_report(store, run, progress):
         f"| YouTube accepted videos | {progress['youtube_accepted']} |",
         f"| YouTube rejected videos | {progress['youtube_rejected']} |",
         "",
+        "## Coverage by post publication year (Vietnam time)",
+        "",
+        "| Year | Platform | Accepted posts/videos | Top-level | Replies | Comments |",
+        "|---|---|---:|---:|---:|---:|",
+    ]
+    for row in progress["coverage_by_year"]:
+        lines.append(
+            f"| {row['year']} | {row['platform']} | {row['accepted_posts']} | "
+            f"{row['top_level']} | {row['replies']} | {row['comments']} |"
+        )
+    lines += [
+        "",
+        "## Discovery queue", "",
+        "| Platform | Status | Tasks |", "|---|---|---:|",
+    ]
+    for row in progress["discovery_by_status"]:
+        lines.append(f"| {row['platform']} | {row['status']} | {row['total']} |")
+    lines += [
+        "",
+        "Counts describe collected data, not proof of exhaustive platform coverage. "
+        "Empty years and pending/failed tasks require review. "
+        "The comment target is a milestone, not a completeness criterion.",
+        "",
         "> [!IMPORTANT]",
         "> Dữ liệu YouTube lấy qua API phải xóa/refresh trong 30 ngày kể từ crawled_at.",
     ]
@@ -231,7 +254,9 @@ def status():
     if not run:
         print("Không có run đang chạy.")
         # vẫn in tổng comment nếu có.
-    progress = store.write_progress(run) if run else {"total_unique_valid": store.comment_count()}
+    progress = store.write_progress(run) if run else {
+        "total_unique_valid": store.comment_count(), "coverage_by_year": store.coverage_by_year(),
+    }
     import json
     print(json.dumps(progress, ensure_ascii=False, indent=2))
     store.close()
