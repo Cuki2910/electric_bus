@@ -131,7 +131,8 @@ def in_date_window(posted_at_epoch, since_epoch, until_epoch):
 
 
 def keep_prefill(verdict):
-    return "1" if verdict == "accept" else "0"
+    """accept -> "1", reject -> "0", uncertain -> "" (left blank for the human reviewer)."""
+    return {"accept": "1", "uncertain": ""}.get(verdict, "0")
 
 
 # --------------------------------------------------------------------------

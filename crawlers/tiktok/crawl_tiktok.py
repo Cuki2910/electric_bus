@@ -76,7 +76,9 @@ DEFAULTS = {
     "delay_min": 15,
     "delay_max": 45,
     "max_videos": 50,
-    "captcha_pause": 30,
+    "captcha_pause": 0,  # deprecated start-of-run pause; CAPTCHAs now pause on demand
+    "captcha_max_attempts": 5,  # Enter-presses per CAPTCHA before giving up
+    "captcha_max_retries": 3,  # solved-then-blocked-again cycles allowed per video
 }
 
 
@@ -444,6 +446,53 @@ def check_block_markers(page):
             raise BlockedError(f"CAPTCHA marker matched: {selector} on {page.url}")
 
 
+def solve_captcha_interactively(page, input_fn=None, max_attempts=None):
+    """Pause for a human to solve a CAPTCHA in the open browser window.
+
+    Prompts on the console, then re-checks the page. Returns True once the
+    block markers are gone, False if still blocked after ``max_attempts``
+    prompts or if there is no console to prompt on (stdin closed).
+    A login redirect (SessionExpiredError) is not handled here and propagates.
+    """
+    input_fn = input_fn or input  # resolved at call time so tests can patch builtins.input
+    max_attempts = max_attempts or DEFAULTS["captcha_max_attempts"]
+    for attempt in range(1, max_attempts + 1):
+        print(f"\n[CAPTCHA] Blocked at {page.url}")
+        print("[CAPTCHA] Solve it in the browser window, then press Enter here to continue "
+              f"(attempt {attempt}/{max_attempts}).")
+        try:
+            input_fn("")
+        except EOFError:
+            return False
+        try:
+            check_block_markers(page)
+        except BlockedError:
+            print("[CAPTCHA] Still blocked.")
+            continue
+        print("[CAPTCHA] Cleared, resuming.")
+        return True
+    return False
+
+
+def check_block_or_wait(page, interactive):
+    """check_block_markers(), but in interactive (headful) mode a CAPTCHA
+    pauses for a human instead of aborting the run.
+
+    Returns True if a CAPTCHA was hit and solved (caller should reload its
+    page), False if there was no block. Raises BlockedError if it could not
+    be solved, or immediately when not interactive.
+    """
+    try:
+        check_block_markers(page)
+        return False
+    except BlockedError:
+        if not interactive:
+            raise
+        if solve_captcha_interactively(page):
+            return True
+        raise
+
+
 # --------------------------------------------------------------------------
 # Pipeline — per-video pool build, rank/select, replies
 # --------------------------------------------------------------------------
@@ -602,11 +651,11 @@ def crawl_video(
     if not pool:
         return [], 0, stop_reason
 
-    # Gate already ran at discovery time -- this is a defensive re-check
-    # only, not a second gate (same convention as crawl_tiktok.py).
-    topic_verdict, topic_rule = gate(meta["post_context"], meta["hashtags"], source=source)
-    if topic_verdict != "accept":
-        return [], len(pool), f"topic_reject:{topic_rule}"
+    # No second gate: topic filtering happens at discovery (gate + human review of
+    # uncertain rows). The page's caption scrape can be empty/different from the
+    # discovery caption, so re-gating on it wrongly dropped on-topic videos. The rule
+    # is computed only to label the record.
+    _, topic_rule = gate(meta["post_context"], meta["hashtags"], source=source)
 
     selected = select_top_n(pool, top_n)
     selected_cids = {c["cid"] for c in selected}
@@ -724,14 +773,35 @@ def build_arg_parser():
     parser.add_argument("--batch-id")
     parser.add_argument("--user-data-dir")
     parser.add_argument("--captcha-pause", type=int, default=DEFAULTS["captcha_pause"],
-                         help="Seconds to pause after opening the first video, headful only, "
-                              "so a CAPTCHA can be solved manually before the run proceeds. "
-                              "0 disables the pause.")
+                         help="Optional fixed wait (seconds) after opening the first video, headful "
+                              "only. Off by default: a CAPTCHA now pauses for you on demand "
+                              "(press Enter after solving), so this is rarely needed.")
     parser.add_argument("--warmup", dest="warmup", action="store_true", default=True,
                          help="Visit tiktok.com's homepage before jumping into video URLs. "
                               "On by default.")
     parser.add_argument("--no-warmup", dest="warmup", action="store_false")
     return parser
+
+
+def crawl_video_with_captcha_pause(page, collector, url, interactive, max_retries=None, **crawl_kwargs):
+    """crawl_video(), but in interactive (headful) mode a CAPTCHA or soft block
+    pauses for a human, then the video is re-crawled from scratch. Nothing is
+    written for a video until crawl_video returns, so a retry never duplicates
+    records. Re-raises BlockedError when not interactive, when the CAPTCHA
+    could not be solved, or after ``max_retries`` solved-then-blocked-again
+    cycles on the same video."""
+    max_retries = DEFAULTS["captcha_max_retries"] if max_retries is None else max_retries
+    retries = 0
+    while True:
+        try:
+            return crawl_video(page, collector, url, **crawl_kwargs)
+        except BlockedError:
+            if not interactive or retries >= max_retries:
+                raise
+            if not solve_captcha_interactively(page):
+                raise
+            retries += 1
+            print(f"[CAPTCHA] Retrying this video from the start (retry {retries}/{max_retries}).")
 
 
 def main(argv=None):
@@ -777,8 +847,9 @@ def main(argv=None):
             print(f"\n=== [{index + 1}/{len(urls)}] {url} ===")
             stats["attempted"] += 1
             try:
-                records, pool_size, video_stop_reason = crawl_video(
+                records, pool_size, video_stop_reason = crawl_video_with_captcha_pause(
                     page, collector, url,
+                    interactive=not headless,
                     top_n=args.top_n,
                     pool_size=args.pool_size,
                     max_rounds=args.max_rounds,
