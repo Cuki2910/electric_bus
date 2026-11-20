@@ -30,8 +30,10 @@ from crawlers.tiktok.crawl_tiktok import (  # noqa: E402
     SessionExpiredError,
     canonical_video_url,
     check_block_markers,
+    check_block_or_wait,
     extract_hashtags,
     launch_context,
+    solve_captcha_interactively,
 )
 
 # Confirmed live against real TikTok traffic during discovery development.
@@ -230,9 +232,15 @@ class DiscoveryCollector:
         return pages
 
 
-def discover_source(page, collector, source, since_epoch, until_epoch, max_candidates, rounds=DISCOVERY_ROUNDS):
+def discover_source(page, collector, source, since_epoch, until_epoch, max_candidates,
+                    rounds=DISCOVERY_ROUNDS, interactive=False):
     """Navigate to one source's surface, paginate by scrolling, return a
-    list of in-window candidate dicts capped at max_candidates."""
+    list of in-window candidate dicts capped at max_candidates.
+
+    ``interactive``: when True (headful runs), a CAPTCHA pauses for a human
+    to solve it, then the source's page is reloaded and discovery continues
+    with the candidates collected so far, instead of aborting the whole run.
+    """
     kind = source["kind"]
     query = source["query"]
     if kind == "keyword_search":
@@ -244,16 +252,22 @@ def discover_source(page, collector, source, since_epoch, until_epoch, max_candi
     else:
         raise ValueError(f"Unsupported source kind: {kind!r}")
 
-    collector.reset()
-    page.goto(url, wait_until="domcontentloaded", timeout=90000)
-    page.wait_for_timeout(4000)
-    check_block_markers(page)
+    def _load():
+        collector.reset()
+        page.goto(url, wait_until="domcontentloaded", timeout=90000)
+        page.wait_for_timeout(4000)
+
+    _load()
+    if check_block_or_wait(page, interactive):
+        _load()
 
     candidates = {}
     for _round_index in range(rounds):
         page.mouse.wheel(0, 1200)
         page.wait_for_timeout(2000)
-        check_block_markers(page)
+        if check_block_or_wait(page, interactive):
+            _load()
+            continue
         for payload in drain():
             items, _has_more, _cursor = parse_page(payload)
             in_window = [c for c in items if in_date_window(c["create_time"], since_epoch, until_epoch)]
@@ -305,6 +319,9 @@ def build_arg_parser():
     parser.add_argument("--until", type=_parse_date_bound, default=None)
     parser.add_argument("--max-per-keyword", type=_positive_int, default=30)
     parser.add_argument("--max-candidates", type=_positive_int, default=2000)
+    parser.add_argument("--rounds", type=_positive_int, default=DISCOVERY_ROUNDS,
+                         help="Max scroll rounds per query (default %(default)s). Raise it together "
+                              "with --max-per-keyword to look deeper into each query's results.")
     parser.add_argument("--headful", dest="headless", action="store_false", default=None)
     parser.add_argument("--headless", dest="headless", action="store_true")
     parser.add_argument("--output-dir", default=OUTPUT_DIR)
@@ -351,7 +368,8 @@ def main(argv=None):
             remaining = args.max_candidates - stats["discovered"]
             effective_max = min(args.max_per_keyword, remaining)
             try:
-                candidates = discover_source(page, collector, source, args.since, args.until, effective_max)
+                candidates = discover_source(page, collector, source, args.since, args.until, effective_max,
+                                             rounds=args.rounds, interactive=not headless)
             except (BlockedError, SessionExpiredError) as exc:
                 print(f"[STOP] {type(exc).__name__}: {exc}")
                 print(f"[STOP] Candidates written before stop: {stats['discovered']}")
